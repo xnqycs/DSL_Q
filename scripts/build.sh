@@ -12,8 +12,9 @@ export DSLQ_APP_VERSION="$app_version" DSLQ_BUILD_NUMBER="$build_number"
 mkdir -p dist .cache
 (cd extension && npm ci --no-audit --no-fund && npm run typecheck && npm run build)
 extension_id="$(tr -d '\n' < extension/dist/extension-id.txt)"
-swift build --package-path macos -c release
-swift_bin_dir="$(swift build --package-path macos -c release --show-bin-path)"
+swift_target="arm64-apple-macosx14.0"
+swift build --package-path macos -c release --triple "$swift_target"
+swift_bin_dir="$(swift build --package-path macos -c release --triple "$swift_target" --show-bin-path)"
 app_dir="$project_root/dist/DSL Q.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Helpers" "$app_dir/Contents/Resources"
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o "$app_dir/Contents/Helpers/dslq-core" ./cmd/dslq-core

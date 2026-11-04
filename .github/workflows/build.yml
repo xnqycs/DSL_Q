@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build:
     name: Check and build macOS ARM64
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 30
     outputs:
       label: ${{ steps.version.outputs.label }}
@@ -62,7 +62,7 @@ jobs:
 
       - name: Show build environment
         run: |
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = x86_64
           xcodebuild -version
           swift --version
           go version
