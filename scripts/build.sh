@@ -12,6 +12,7 @@ mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Helpers" "$app_dir/Content
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o "$app_dir/Contents/Helpers/dslq-core" ./cmd/dslq-core
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.extensionID=$extension_id" -o "$app_dir/Contents/Helpers/dslq-host" ./cmd/dslq-host
 cp "$swift_bin_dir/DSLQ" "$app_dir/Contents/MacOS/DSLQ"
+cp LICENSE NOTICE THIRD_PARTY_NOTICES.md "$app_dir/Contents/Resources/"
 mkdir -p "$app_dir/Contents/Resources/extension"
 cp extension/dist/* "$app_dir/Contents/Resources/extension/"
 python3 - <<'PY'

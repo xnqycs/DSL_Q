@@ -70,3 +70,13 @@ open 'dist/DSL Q.app'
 - `scripts`：构建、测试和本地联调。
 
 Safari、BT、FTP、网页媒体解析及公开分发不属于此版本。
+
+## 许可证
+
+DSL Q 的原创代码、文档和构建脚本采用 **GNU GPL v3.0（仅第 3 版，`GPL-3.0-only`）**，覆盖 Go 下载核心、Native Messaging 桥接程序、SwiftUI 应用和 Chrome 扩展。完整条款见 [LICENSE](LICENSE)，版权与适用范围见 [NOTICE](NOTICE)。
+
+允许个人及商业使用、修改和分发，包括收费分发。分发受 GPL 覆盖的程序或修改版时，须按 GPL 提供对应源码、保留版权及许可声明，并遵守其余条款；仅供自己使用的修改无需公开。本软件不提供任何担保，具体以许可证原文为准。
+
+第三方组件继续遵循各自许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。构建时会将这三个许可文件复制到应用的 `Contents/Resources` 和 Chrome 扩展目录，导出扩展时一并保留。
+
+通过网络公开分发应用或扩展时，应在下载位置同时提供对应版本的完整源码（包括构建脚本），或清楚标明其获取位置，并满足 GPL 第 6 条的要求。更新依赖或 Go 工具链时，须同步核对第三方许可声明。

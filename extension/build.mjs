@@ -12,4 +12,5 @@ const manifest = { manifest_version:3, name:'DSL Q 下载助手', version, descr
 await writeFile('dist/manifest.json',JSON.stringify(manifest,null,2)+'\n');
 await writeFile('dist/extension-id.txt',id+'\n');
 for(const f of ['popup.html','popup.css']) await copyFile(f,`dist/${f}`);
+for(const f of ['LICENSE','NOTICE','THIRD_PARTY_NOTICES.md']) await copyFile(new URL(`../${f}`, import.meta.url),`dist/${f}`);
 process.stdout.write(`Extension ID: ${id}\n`);
