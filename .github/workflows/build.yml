@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build:
     name: Check and build macOS ARM64
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 30
     outputs:
       label: ${{ steps.version.outputs.label }}

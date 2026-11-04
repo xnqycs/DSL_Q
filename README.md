@@ -182,7 +182,7 @@ scripts/          构建、检查和本地联调
 
 ### 自动构建与发布
 
-[Build and Release](.github/workflows/build.yml) 使用 GitHub 的 `macos-26` ARM64 runner，固定 Go 1.27.3 和 Node.js 22.23.4，复用项目构建与检查脚本。
+[Build and Release](.github/workflows/build.yml) 使用 GitHub 的 `macos-15` ARM64 runner，固定 Go 1.27.3 和 Node.js 22.23.4，复用项目构建与检查脚本。
 
 | 触发方式 | 执行内容 |
 | --- | --- |
