@@ -340,6 +340,9 @@ func TestHandoffIdempotenceAndFilenameCollision(t *testing.T) {
 	if v.State != "prepared" || v.Name != "file.zip" {
 		t.Fatalf("unexpected %+v", v)
 	}
+	if e = os.MkdirAll(filepath.Dir(v.Path), 0700); e != nil {
+		t.Fatal(e)
+	}
 	if e = os.WriteFile(v.Path, []byte("existing user file"), 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -347,6 +350,9 @@ func TestHandoffIdempotenceAndFilenameCollision(t *testing.T) {
 		t.Fatal(e)
 	}
 	if _, e = m.Handoff(r.HandoffID, "commit"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = m.Confirm(Confirmation{ID: v.ID, Filename: v.Name, Directory: filepath.Dir(v.Path)}); e != nil {
 		t.Fatal(e)
 	}
 	done := finish(t, m, v.ID)

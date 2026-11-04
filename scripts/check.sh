@@ -9,3 +9,5 @@ swiftc -parse-as-library -target arm64-apple-macos14.0 macos/Sources/DSLQ/Models
 .cache/power-checks
 swiftc -parse-as-library -target arm64-apple-macos14.0 macos/Sources/DSLQ/Models.swift macos/Sources/DSLQ/ChromeExtensionExport.swift macos/Checks/ChromeExtensionExportChecks.swift -o .cache/chrome-export-checks
 .cache/chrome-export-checks
+swiftc -parse-as-library -target arm64-apple-macos14.0 macos/Sources/DSLQ/Models.swift macos/Sources/DSLQ/TaskNotifications.swift macos/Checks/NotificationChecks.swift -o .cache/notification-checks
+.cache/notification-checks

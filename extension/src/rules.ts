@@ -12,7 +12,7 @@ export interface Candidate {
 }
 export type DecisionCode = "captured" | "disabled" | "rule_mismatch" | "excluded" | "incognito" | "unsafe" |
   "unsupported_url" | "other_extension" | "request_missing" | "request_ambiguous" | "request_unsupported" |
-  "auth_failed" | "prepare_failed" | "handoff_pending" | "browser_finished";
+  "auth_failed" | "prepare_failed" | "prepare_timeout" | "handoff_pending" | "browser_finished";
 export const decisionLabels: Record<DecisionCode, string> = {
   captured: "已交给 DSL Q", disabled: "自动接管未开启", rule_mismatch: "未匹配文件类型或大小规则",
   excluded: "站点已排除", incognito: "无痕下载由 Chrome 处理", unsafe: "Chrome 正在检查或已警告此下载",
@@ -20,6 +20,7 @@ export const decisionLabels: Record<DecisionCode, string> = {
   request_missing: "未找到对应请求，请检查网站授权", request_ambiguous: "存在多个相同请求，保留在 Chrome",
   request_unsupported: "非 GET 请求由 Chrome 处理", auth_failed: "无法复现网站登录或授权，已恢复 Chrome 下载",
   prepare_failed: "客户端准备失败，已恢复 Chrome 下载", handoff_pending: "交接尚未确认，等待客户端恢复",
+  prepare_timeout: "客户端准备超时，本次由 Chrome 下载（保留浏览器保存提示）",
   browser_finished: "Chrome 已结束下载",
 };
 export function captureReason(item: Candidate, settings: CaptureSettings, forced = false): DecisionCode | undefined {

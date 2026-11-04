@@ -38,7 +38,7 @@ struct DownloadCommands: Commands {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
     var body: some Commands {
-        CommandGroup(replacing: .newItem) { Button("新建下载") { openWindow(id: "main"); model.showAdd = true }.keyboardShortcut("n") }
+        CommandGroup(replacing: .newItem) { Button("新建下载") { model.windows.newDownload() }.keyboardShortcut("n") }
         CommandGroup(replacing: .appSettings) { Button("设置…") { openWindow(id: "main"); model.showSettings = true }.keyboardShortcut(",") }
     }
 }
@@ -49,7 +49,7 @@ struct MenuContent: View {
     var body: some View {
         Text("\(model.activeCount) 个任务正在下载 · \(bytes(Int64(model.totalSpeed)))/s")
         Button("打开 DSL Q") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
-        Button("新建下载…") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true); model.showAdd = true }
+        Button("新建下载…") { model.windows.newDownload() }
         Divider()
         Button("全部暂停") { for task in model.tasks where task.isActive || task.state == "queued" { model.action(task, "pause") } }
         Button("继续已暂停任务") { for task in model.tasks where task.state == "paused" { model.action(task, "resume") } }

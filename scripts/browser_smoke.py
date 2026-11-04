@@ -1,5 +1,5 @@
 """Real Chrome integration in a disposable profile and encrypted database."""
-import argparse, base64, hashlib, json, os, queue, shlex, shutil, subprocess, tempfile, threading, time, uuid
+import argparse, base64, hashlib, json, os, queue, shlex, shutil, signal, subprocess, tempfile, threading, time, uuid
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from fixture import start_server
@@ -49,13 +49,24 @@ def check_hash(path,size):
     assert path.stat().st_size==size
     assert hashlib.sha256(path.read_bytes()).hexdigest()==expected.hexdigest()
 
+def cold_app_pid(data):
+    processes={}
+    for line in subprocess.check_output(['ps','-axo','pid=,ppid=,args='],text=True).splitlines():
+        fields=line.strip().split(None,2)
+        if len(fields)==3:processes[int(fields[0])]=(int(fields[1]),fields[2])
+    for pid,(parent,command) in processes.items():
+        if '/dslq-core --data-dir '+str(data) == command[command.find('/dslq-core --data-dir '):] and parent in processes:
+            app_command=processes[parent][1]
+            if str(APP/'Contents/MacOS/DSLQ') in app_command and '--integration-test' in app_command:return parent
+    return None
+
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--browser',default='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');parser.add_argument('--label',default='chrome');parser.add_argument('--headed',action='store_true');parser.add_argument('--cold-start',action='store_true');parser.add_argument('--trace-handoff',action='store_true');parser.add_argument('--small-only',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--browser',default='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');parser.add_argument('--label',default='chrome');parser.add_argument('--headed',action='store_true');parser.add_argument('--cold-start',action='store_true');parser.add_argument('--trace-handoff',action='store_true');parser.add_argument('--small-only',action='store_true');parser.add_argument('--prompt-check',action='store_true');args=parser.parse_args()
     work=Path(tempfile.mkdtemp(prefix='bc.',dir=ROOT/'.cache'));profile=work/'profile';profile.mkdir();data=work/'data';downloads=work/'downloads'
     # Exercise Chrome's real filename pipeline. Playwright's allowAndName mode
     # forces UUID filenames and bypasses extension filename determination.
     (profile/'Default').mkdir()
-    (profile/'Default/Preferences').write_text(json.dumps({'download':{'default_directory':str(work/'browser-downloads'),'prompt_for_download':False}}))
+    (profile/'Default/Preferences').write_text(json.dumps({'download':{'default_directory':str(work/'browser-downloads'),'prompt_for_download':args.prompt_check}}))
     core=Core(data);server=start_server();base=f'http://127.0.0.1:{server.server_port}'
     settings=core.snapshot['settings'];settings.update(directory=str(downloads),autoCapture=True,connections=8,preventIdleSleepWhileDownloading=True)
     core.call('settings.update',settings)
@@ -71,6 +82,21 @@ def main():
     manifest=json.loads((runtime_extension/'manifest.json').read_text())
     manifest['host_permissions']=['http://127.0.0.1/*']
     (runtime_extension/'manifest.json').write_text(json.dumps(manifest))
+    if args.prompt_check:
+        # Observe when Chrome may continue to its native Save As UI. This wrapper
+        # changes no download behavior; it records state at the real callback.
+        background=runtime_extension/manifest['background']['service_worker']
+        background.write_text('''
+const originalFilenameListener = chrome.downloads.onDeterminingFilename.addListener.bind(chrome.downloads.onDeterminingFilename);
+originalFilenameListener && (chrome.downloads.onDeterminingFilename.addListener = listener => originalFilenameListener((item, suggest) => listener(item, suggestion => {
+    chrome.downloads.search({id:item.id}).then(async items => {
+        const rows = (await chrome.storage.session.get('filenameReleases')).filenameReleases || [];
+        rows.push({id:item.id, state:items[0]?.state, paused:items[0]?.paused});
+        await chrome.storage.session.set({filenameReleases:rows});
+    });
+    suggest(suggestion);
+})));
+''' + background.read_text())
     try:
         with sync_playwright() as p:
             context=p.chromium.launch_persistent_context(str(profile),executable_path=str(Path(args.browser).resolve()),headless=not args.headed,accept_downloads=True,
@@ -110,15 +136,67 @@ def main():
                 report['checks'].append('loopback-only test manifest permission')
                 page=context.new_page();page.goto(base);page.wait_for_load_state('networkidle')
                 print('Fixture:',page.locator('body').inner_text(),flush=True)
+                def confirm_waiting():
+                    tasks=core.call('snapshot')['tasks']
+                    for task in tasks:
+                        if task['state']=='awaiting_confirmation':
+                            assert not task['started'] and task['received']==0,task
+                            core.call('tasks.confirm',{'id':task['id'],'directory':str(downloads),'filename':task['name'],'connections':0})
+                    return core.call('snapshot')['tasks']
+                if args.prompt_check:
+                    def releases():
+                        return popup.evaluate('async()=> (await chrome.storage.session.get("filenameReleases")).filenameReleases || []')
+                    for filename,delay in [('slow-prepare.tar.gz',5),('tiny.pdf',0)]:
+                        url=base+'/download?filename='+filename+'&size=1024&probe_delay='+str(delay)
+                        page.evaluate('(url)=>{const a=document.createElement("a");a.href=url;a.textContent="Prompt check";document.body.append(a);a.click();}',url)
+                        pending=wait(lambda:next((t for t in core.call('snapshot')['tasks'] if t['name']==filename and t['state']=='awaiting_confirmation'),None))
+                        items=popup.evaluate('(url)=>chrome.downloads.search({url})',url)
+                        assert len(items)==1 and items[0]['state']=='interrupted',items
+                        release=wait(lambda:next((r for r in releases() if r['id']==items[0]['id']),None))
+                        assert release['state']=='interrupted',('Chrome was allowed to show Save As before capture',release)
+                        assert not pending['started'] and not Path(pending['path']).exists()
+                        core.call('tasks.action',{'id':pending['id'],'action':'cancel'})
+                        report['checks'].append(filename+': prompt enabled, filename callback released only after Chrome cancellation')
+                    # Explicit sends share the same filename gate as automatic capture.
+                    popup.get_by_role('textbox',name='文件链接').fill(base+'/prompt-manual.bin?size=1024&probe_delay=3')
+                    popup.get_by_role('button',name='下载此链接').click()
+                    pending=wait(lambda:next((t for t in core.call('snapshot')['tasks'] if t['name']=='prompt-manual.bin' and t['state']=='awaiting_confirmation'),None))
+                    item=popup.evaluate('(url)=>chrome.downloads.search({url})',base+'/prompt-manual.bin?size=1024&probe_delay=3')[0]
+                    release=wait(lambda:next((r for r in releases() if r['id']==item['id']),None))
+                    assert release['state']=='interrupted',release
+                    core.call('tasks.action',{'id':pending['id'],'action':'cancel'})
+                    report['checks'].append('explicit send: prompt enabled, only DSL Q confirmation')
+                    for path,code in [('unreplayable.zip?size=1024','auth_failed'),('small.unlisted','rule_mismatch'),('timeout.zip?size=1024&probe_delay=14','prepare_timeout')]:
+                        url=base+'/'+path
+                        page.evaluate('(url)=>{const a=document.createElement("a");a.href=url;document.body.append(a);a.click();}',url)
+                        item=wait(lambda:next(iter(popup.evaluate('(url)=>chrome.downloads.search({url})',url)),None))
+                        release=wait(lambda:next((r for r in releases() if r['id']==item['id']),None))
+                        assert release['state']=='in_progress',release
+                        wait(lambda:any(d['downloadId']==item['id'] and d['code']==code for d in popup.evaluate('async()=> (await chrome.storage.session.get("decisions")).decisions')))
+                        if code=='prepare_timeout':
+                            wait(lambda:not any(k.startswith('handoff:') for k in popup.evaluate('()=>chrome.storage.local.get(null)')))
+                        assert not core.call('snapshot')['tasks'],'fallback must not create a confirmation'
+                        popup.evaluate('(id)=>chrome.downloads.cancel(id)',item['id'])
+                        report['checks'].append(code+': prompt enabled, Chrome retained, no late DSL Q task')
+                    report['version']=context.browser.version
+                    print(json.dumps(report,ensure_ascii=False),flush=True)
+                    return
                 if args.small_only:
                     page.get_by_role('link',name='Small document',exact=True).click()
-                    task=wait(lambda:next((t for t in core.call('snapshot')['tasks'] if t['name']=='small-document.pdf' and t['state']=='completed'),None),timeout=15)
+                    task=wait(lambda:next((t for t in confirm_waiting() if t['name']=='small-document.pdf' and t['state']=='completed'),None),timeout=15)
                     check_hash(Path(task['path']),1024)
                     report['checks'].append('1 KiB PDF captured using native Chrome filename determination')
                     return
                 page.get_by_role('link',name='Automatic archive').click()
+                pending=wait(lambda:next((t for t in core.call('snapshot')['tasks'] if t['state']=='awaiting_confirmation'),None))
+                time.sleep(.4)
+                assert not core.call('snapshot')['tasks'][0]['started']
+                assert not downloads.exists() or not list(downloads.iterdir()),'files allocated before confirmation'
+                original=popup.evaluate('(url)=>chrome.downloads.search({url})',base+'/auto.zip')
+                assert len(original)==1 and original[0]['state']=='interrupted',original
+                report['checks'].append('Chrome handoff waits for user confirmation without allocating destination files')
                 def completed(name):
-                    tasks=core.call('snapshot')['tasks']
+                    tasks=confirm_waiting()
                     failed=[t for t in tasks if t['state']=='failed']
                     assert not failed,failed
                     return next((t for t in tasks if t['source'].endswith('/'+name) and t['state']=='completed'),None)
@@ -131,7 +209,7 @@ def main():
                     before_ids={t['id'] for t in core.call('snapshot')['tasks']}
                     page.get_by_role('link',name=label,exact=True).click()
                     def new_completed():
-                        tasks=core.call('snapshot')['tasks']
+                        tasks=confirm_waiting()
                         failed=[t for t in tasks if t['id'] not in before_ids and t['state']=='failed'];assert not failed,failed
                         return next((t for t in tasks if t['id'] not in before_ids and t['state']=='completed'),None)
                     task=wait(new_completed,timeout=45)
@@ -142,6 +220,14 @@ def main():
                     matching=popup.evaluate('(id)=>chrome.downloads.search({id})',decision['downloadId'])
                     assert len(matching)==1 and matching[0]['state']=='interrupted',matching
                     report['checks'].append(label+': filename, one task, cancelled Chrome download, SHA-256')
+                page.get_by_role('link',name='Cancel confirmation').click()
+                pending=wait(lambda:next((t for t in core.call('snapshot')['tasks'] if t['state']=='awaiting_confirmation'),None))
+                core.call('tasks.action',{'id':pending['id'],'action':'cancel'})
+                assert not any(t['id']==pending['id'] for t in core.call('snapshot')['tasks'])
+                original=popup.evaluate('(url)=>chrome.downloads.search({url})',base+'/cancel-confirm.zip?size=2097152')
+                assert len(original)==1 and original[0]['state']=='interrupted'
+                assert not Path(pending['path']).exists()
+                report['checks'].append('cancel confirmation stops both downloads and removes visible draft')
                 before=len(core.call('snapshot')['tasks'])
                 page.get_by_role('link',name='Unreplayable login').click()
                 wait(lambda:next((i for i in popup.evaluate('(url)=>chrome.downloads.search({url})',base+'/unreplayable.zip?size=2097152') if i['state']=='complete'),None))
@@ -212,17 +298,11 @@ def main():
                     before=set(downloads.iterdir());core.close()
                     cold_popup.get_by_role('textbox',name='文件链接').fill(base+'/cold.bin?size=25165824')
                     cold_popup.get_by_role('button',name='下载此链接').click()
-                    saw_assertion=False;deadline=time.time()+35
-                    while time.time()<deadline:
-                        output=subprocess.check_output(['pmset','-g','assertions'],text=True)
-                        saw_assertion=saw_assertion or '(DSLQ)' in output
-                        new_files=[f for f in downloads.iterdir() if f not in before and not f.name.startswith('.')]
-                        if new_files:break
-                        time.sleep(.1)
-                    assert new_files,'cold launch did not complete download';check_hash(new_files[0],24*1024*1024)
-                    assert saw_assertion,'SwiftUI app never held the download power assertion'
-                    wait(lambda:'(DSLQ)' not in subprocess.check_output(['pmset','-g','assertions'],text=True))
-                    report['checks'].append('native host cold-launches SwiftUI app, downloads, and releases real power assertion')
+                    wait(lambda:any(d.get('code')=='captured' and d.get('filename')=='cold.bin' for d in cold_popup.evaluate('async()=> (await chrome.storage.session.get("decisions")).decisions')))
+                    assert not [f for f in downloads.iterdir() if f not in before], 'cold startup downloaded before confirmation'
+                    app_pid=wait(lambda:cold_app_pid(data))
+                    assert 'pid '+str(app_pid)+'(' not in subprocess.check_output(['pmset','-g','assertions'],text=True)
+                    report['checks'].append('native host cold-launches app and waits for confirmation without download or power assertion')
                 report['version']=context.browser.version
                 print(json.dumps(report,ensure_ascii=False),flush=True)
             finally:
@@ -234,6 +314,9 @@ def main():
                 except Exception as e:print('State collection:',str(e),flush=True)
                 context.close()
     finally:
+        if args.cold_start:
+            app_pid=cold_app_pid(data)
+            if app_pid:os.kill(app_pid,signal.SIGTERM)
         core.close();server.shutdown()
         (ROOT/'.cache'/f'{args.label}-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
 

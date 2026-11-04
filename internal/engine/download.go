@@ -221,6 +221,7 @@ func (m *Manager) download(ctx context.Context, id string) error {
 		t.Received = 0
 		resume = false
 	}
+	t.ContentType = p.contentType
 	t.Total = p.total
 	t.ETag = p.etag
 	t.Modified = p.modified
@@ -304,6 +305,10 @@ func (m *Manager) download(ctx context.Context, id string) error {
 	}
 	m.mu.Lock()
 	t = m.tasks[id]
+	if ctx.Err() != nil {
+		m.mu.Unlock()
+		return ctx.Err()
+	}
 	t.State = "finishing"
 	t.BodyComplete = true
 	e = m.store.put(id, t)
@@ -578,6 +583,9 @@ func (m *Manager) finalize(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t := m.tasks[id]
+	if !active(t.State) {
+		return context.Canceled
+	}
 	stamp := fmt.Sprintf("0081;%x;DSL Q;", time.Now().Unix())
 	if e := unix.Setxattr(t.TempPath, "com.apple.quarantine", []byte(stamp), 0); e != nil {
 		return errors.New("无法设置 macOS 下载隔离属性，请更换保存目录后重试")

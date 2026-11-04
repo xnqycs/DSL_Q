@@ -13,6 +13,16 @@ const handling = new Set<number>();
 const settled = new Set<number>();
 const manualURLs = new Set<string>();
 const candidates = new Map<number, { filename?: string }>();
+// Chrome asks extensions before opening Save As, but stops waiting after 15 s.
+// Keep our callback until cancellation or an explicit fallback, with time left
+// for Chrome to recover. Never take over after releasing it to the browser.
+const filenameGates = new Map<number, { release: () => void; metadataReady: boolean }>();
+function releaseFilename(id: number) { filenameGates.get(id)?.release(); }
+function leaveInBrowser(id: number) {
+  if (!filenameGates.has(id)) return; // onCreated may precede the actual filename.
+  void finish(id);
+  releaseFilename(id);
+}
 interface Pending { id: string; downloadId: number; phase: HandoffPhase; createdAt: number }
 const pendingDownloads = new Map<number, Pending>();
 const pendingKey = (id: string) => `handoff:${id}`;
@@ -148,13 +158,14 @@ async function processDownload(id: number) {
   handling.add(id);
   try {
     [item] = await chrome.downloads.search({ id });
-    if (!item) { candidates.delete(id); return; }
+    if (!item) { candidates.delete(id); releaseFilename(id); return; }
     if (item.state !== "in_progress") {
       candidates.delete(id);
       if (!decisions.some(d => d.downloadId === id)) await note(item, "browser_finished");
+      releaseFilename(id);
       return;
     }
-    if (item.paused) return;
+    if (item.paused) { leaveInBrowser(id); return; }
     const forced = item.byExtensionId === chrome.runtime.id;
     const match = matchRequest(item, [...records.values()]);
     const record = match.record;
@@ -163,11 +174,22 @@ async function processDownload(id: number) {
     item = { ...item, filename: record?.filename || candidates.get(id)?.filename || item.filename,
       totalBytes: item.totalBytes >= 0 ? item.totalBytes : record?.totalBytes ?? -1 };
     const reason = captureReason(item, settings, forced);
-    if (reason) { await note(item, reason); return; }
-    if (item.byExtensionId && !forced) { await note(item, "other_extension"); return; }
+    if (reason) {
+      await note(item, reason);
+      // Response and filename events may arrive in either order. Give missing
+      // metadata a short grace period, without delaying known browser-only cases.
+      if (reason !== "rule_mismatch" || record || filenameGates.get(id)?.metadataReady) leaveInBrowser(id);
+      return;
+    }
+    if (item.byExtensionId && !forced) { await note(item, "other_extension"); leaveInBrowser(id); return; }
     // Only our explicit downloads.download action is a known GET without
     // webRequest evidence. Never assume an unobserved website request is GET.
-    if (!record && !forced) { await note(item, match.reason!); return; }
+    if (!record && !forced) {
+      await note(item, match.reason!);
+      if (match.reason !== "request_missing" || filenameGates.get(id)?.metadataReady) leaveInBrowser(id);
+      return;
+    }
+    if (settled.has(id)) return;
     const url = item.finalUrl || item.url;
     const headers = record?.headersOrigin === new URL(url).origin ? record.headers : {};
     if (record) { record.downloadId = id; await persistRequests(); }
@@ -178,10 +200,13 @@ async function processDownload(id: number) {
     if (!paused || paused.state !== "in_progress" || !paused.paused || paused.danger !== "safe") throw new Error("原下载状态已变化");
     await native("browser.prepare", { url, filename: basename(item.filename), headers, handoffId: pending.id });
     pending.phase = "prepared"; await savePending(pending);
+    if (settled.has(id)) throw new Error("filename_timeout");
     const [current] = await chrome.downloads.search({ id });
     if (!current || current.state !== "in_progress" || current.danger !== "safe") throw new Error("原下载已结束");
     pending.phase = "cancelling"; await savePending(pending);
+    if (settled.has(id)) { pending.phase = "prepared"; await savePending(pending); throw new Error("filename_timeout"); }
     await chrome.downloads.cancel(id);
+    releaseFilename(id);
     pending.phase = "cancelled"; await savePending(pending);
     await native("browser.commit", { handoffId: pending.id });
     await note(item, "captured"); await forget(pending);
@@ -190,10 +215,14 @@ async function processDownload(id: number) {
       try {
         const action = await recover(pending);
         if (item) await note(item, action === "commit" || action === "done" ? "captured" :
+          /filename_timeout/.test(String(error)) ? "prepare_timeout" :
           /授权|登录|返回网页|401|403/.test(String(error)) ? "auth_failed" : "prepare_failed");
       } catch { if (item) await note(item, "handoff_pending"); await badge(); }
     } else if (item) await note(item, "prepare_failed");
-  } finally { handling.delete(id); }
+  } finally {
+    handling.delete(id);
+    if (pending || settled.has(id)) releaseFilename(id);
+  }
 }
 
 async function recover(p: Pending): Promise<"commit" | "abort" | "done"> {
@@ -230,18 +259,34 @@ async function recoverAll() {
 
 chrome.downloads.onCreated.addListener(item => { void enqueue(item.id); });
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  // Let filename/response metadata be evaluated before a small download can
-  // finish. Always release Chrome's filename callback, even if native IPC stalls.
+  if (settled.has(item.id) || item.state !== "in_progress") { suggest(); return; }
   let released = false;
-  const release = () => { if (!released) { released = true; suggest(); } };
-  const timer = setTimeout(release, 1500);
-  void enqueue(item.id, item.filename).finally(() => { clearTimeout(timer); release(); });
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(deadline); clearTimeout(metadata);
+    filenameGates.delete(item.id);
+    suggest();
+  };
+  const deadline = setTimeout(() => {
+    void finish(item.id); // Synchronously prevents a late prepare from cancelling.
+    release();
+    const pending = pendingDownloads.get(item.id);
+    if (pending) void resumeBrowser(pending).catch(() => badge());
+    void note(item, "prepare_timeout");
+  }, 13_000);
+  const metadata = setTimeout(() => {
+    const gate = filenameGates.get(item.id);
+    if (gate) { gate.metadataReady = true; void enqueue(item.id); }
+  }, 750);
+  filenameGates.set(item.id, { release, metadataReady: false });
+  void enqueue(item.id, item.filename);
   return true;
 });
 chrome.downloads.onChanged.addListener(delta => {
   if (delta.filename || delta.totalBytes || delta.danger || delta.finalUrl || delta.state || delta.paused) void enqueue(delta.id, delta.filename?.current);
 });
-chrome.downloads.onErased.addListener(id => { candidates.delete(id); });
+chrome.downloads.onErased.addListener(id => { candidates.delete(id); releaseFilename(id); });
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => chrome.contextMenus.create({ id: "send-dslq", title: "使用 DSL Q 下载链接", contexts: ["link"] }));

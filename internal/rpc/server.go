@@ -74,6 +74,16 @@ func Dispatch(ctx context.Context, m *engine.Manager, r Request, browser bool) R
 			}
 			value, err = m.Add(ctx, req, r.Method == "browser.prepare")
 		}
+	case "tasks.preview":
+		var req engine.Request
+		if err = json.Unmarshal(r.Params, &req); err == nil {
+			value, err = m.Preview(ctx, req)
+		}
+	case "tasks.confirm":
+		var p engine.Confirmation
+		if err = json.Unmarshal(r.Params, &p); err == nil {
+			value, err = m.Confirm(p)
+		}
 	case "tasks.action":
 		var p struct {
 			ID     string `json:"id"`

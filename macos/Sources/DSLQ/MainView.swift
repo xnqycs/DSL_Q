@@ -13,7 +13,7 @@ struct MainView: View {
     private let filters: [(String, String, String)] = [("all", "全部任务", "tray.full"), ("active", "正在下载", "arrow.down.circle"), ("paused", "已暂停", "pause.circle"), ("completed", "已完成", "checkmark.circle"), ("failed", "下载失败", "exclamationmark.circle")]
     var filtered: [DownloadTask] {
         model.tasks.filter { t in
-            let matches = filter == "all" || filter == nil || (filter == "active" ? t.isActive || t.state == "queued" || t.state == "prepared" : t.state == filter)
+            let matches = filter == "all" || filter == nil || (filter == "active" ? t.isActive || t.state == "queued" || t.state == "prepared" || t.awaitingConfirmation : t.state == filter)
             return matches && (search.isEmpty || t.name.localizedCaseInsensitiveContains(search) || t.source.localizedCaseInsensitiveContains(search))
         }.reversed()
     }
@@ -51,7 +51,7 @@ struct MainView: View {
                             } description: {
                                 Text(model.tasks.isEmpty ? "粘贴文件链接，或从 Chrome 发送下载。" : "试试其他筛选条件或搜索关键词。")
                             } actions: {
-                                Button("新建下载") { model.showAdd = true }.buttonStyle(.borderedProminent).disabled(!model.connected)
+                                Button("新建下载") { model.windows.newDownload() }.buttonStyle(.borderedProminent).disabled(!model.connected)
                             }
                         } else { taskTable }
                     }.frame(minWidth: 470, maxWidth: .infinity, maxHeight: .infinity)
@@ -69,22 +69,26 @@ struct MainView: View {
             .navigationTitle(filters.first { $0.0 == filter }?.1 ?? "全部任务")
             .toolbar {
                 ToolbarItemGroup {
-                    Button { model.showAdd = true } label: { Label("新建下载", systemImage: "plus") }.help("新建下载 ⌘N").disabled(!model.connected)
-                    if let task = selection, task.state != "completed" {
+                    Button { model.windows.newDownload() } label: { Label("新建下载", systemImage: "plus") }.help("新建下载 ⌘N").disabled(!model.connected)
+                    if let task = selection, task.awaitingConfirmation {
+                        Button("确认下载") { model.windows.showConfirmation(task.id) }
+                    } else if let task = selection, task.state == "cancelled" {
+                        Button("从头下载") { model.action(task, "restart") }
+                    } else if let task = selection, task.state != "completed" {
                         Button { model.action(task, task.isActive || task.state == "queued" ? "pause" : "resume") } label: {
                             Label(task.isActive || task.state == "queued" ? "暂停" : "继续", systemImage: task.isActive || task.state == "queued" ? "pause" : "play")
-                        }.disabled(task.state == "prepared")
+                        }.disabled(task.state == "prepared" || task.state == "cancelling")
                     }
                     Button { showInspector.toggle() } label: { Label("任务详情", systemImage: "sidebar.right") }
                 }
             }
             .searchable(text: $search, prompt: "搜索名称或来源")
         }
-        .sheet(isPresented: $model.showAdd) { AddDownloadView(model: model) }
         .onAppear {
             delegate.model = model
             let action = openWindow
             delegate.reopenMainWindow = { action(id: "main") }
+            model.reopenMainWindow = { action(id: "main") }
             model.start()
         }
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
@@ -116,15 +120,22 @@ struct MainView: View {
         }
         .contextMenu(forSelectionType: String.self) { ids in
             if let id = ids.first, let task = model.tasks.first(where: { $0.id == id }) {
-                if task.state == "completed" {
+                Button(task.awaitingConfirmation ? "确认下载…" : "显示进度窗口") { model.windows.openProgress(task.id) }.disabled(task.state == "prepared")
+                if task.awaitingConfirmation {
+                    Button("取消下载", role: .destructive) { model.action(task, "cancel") }
+                } else if task.state == "cancelled" {
+                    Button("从头下载") { model.action(task, "restart") }
+                } else if task.state == "completed" {
                     Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: task.path)]) }
-                } else if task.state != "prepared" {
+                } else if task.state != "prepared" && task.state != "cancelling" {
                     Button(task.isActive ? "暂停" : "继续下载") { model.action(task, task.isActive ? "pause" : "resume") }
                     if task.state == "failed" || task.state == "paused" { Button("从头下载") { model.action(task, "restart") } }
                 }
                 Divider()
-                Button("移除任务…", role: .destructive) { deleting = task }
+                Button("移除任务…", role: .destructive) { deleting = task }.disabled(task.state == "prepared" || task.state == "cancelling")
             }
+        } primaryAction: { ids in
+            if let id = ids.first { model.windows.openProgress(id) }
         }
     }
 }

@@ -1,40 +1,88 @@
 import AppKit
 import SwiftUI
 
-struct AddDownloadView: View {
+struct DownloadConfirmationView: View {
+    @ObservedObject var session: DownloadConfirmation
     @ObservedObject var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-    @ViewState private var links = ""
-    @ViewState private var directory = ""
-    @ViewState private var connections = 0
-    @ViewState private var working = false
-    @ViewState private var error: String?
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack { Image(systemName: "arrow.down.circle.fill").font(.largeTitle).foregroundStyle(.tint); VStack(alignment: .leading, spacing: 3) { Text("新建下载").font(.title2.weight(.semibold)); Text("每行一个 HTTP 或 HTTPS 文件链接").foregroundStyle(.secondary) } }
-            TextEditor(text: $links).font(.body.monospaced()).frame(height: 145).padding(8).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8)).accessibilityLabel("下载链接")
-            HStack { Text("保存到").foregroundStyle(.secondary); Text(directory).lineLimit(1).truncationMode(.middle); Spacer(); Button("选择…") { if let path = chooseDirectory(directory) { directory = path } } }
-            Picker("分段并发", selection: $connections) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.down.doc.fill").font(.system(size: 32)).foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("下载文件信息").font(.title2.weight(.semibold))
+                    Text("确认保存位置后开始下载").foregroundStyle(.secondary)
+                }
+            }
+            if session.taskID == nil {
+                TextEditor(text: $session.links).font(.body.monospaced()).frame(height: 76).padding(6).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8)).accessibilityLabel("下载链接")
+                    .disabled(session.working)
+                Text(session.urls.count > 1 ? "共 \(session.urls.count) 个链接，当前确认第 1 项；其余项目随后逐个确认。" : "粘贴 HTTP / HTTPS 链接；多个链接每行一个。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack { Text("文件名").frame(width: 65, alignment: .leading); TextField("文件名", text: Binding(get: { session.filename }, set: { session.filename = $0; session.nameEdited = true })).disabled(session.working) }
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+                info("大小", session.preview.map { bytes($0.total) } ?? "未知")
+                info("类型", session.preview?.contentType.isEmpty == false ? session.preview!.contentType : "未知")
+                info("续传", session.preview.map { $0.resumable ? "支持" : "不支持或无需分段" } ?? "未知")
+                info("来源", session.preview?.source ?? source)
+            }.font(.callout)
+            if session.loading { HStack { ProgressView().controlSize(.small); Text("正在获取文件信息…").font(.caption).foregroundStyle(.secondary) } }
+            if let issue = session.previewError {
+                HStack(alignment: .top) {
+                    Text(issue + " 可重试，或直接开始下载。").font(.caption).foregroundStyle(.orange)
+                    Spacer(); Button("重试") { Task { await preview() } }.disabled(session.loading)
+                }
+            }
+            Divider()
+            HStack {
+                Text("保存到").foregroundStyle(.secondary)
+                Text(session.directory).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                Spacer(); Button("选择…") { if let path = chooseDirectory(session.directory) { session.directory = path } }.disabled(session.working)
+            }
+            Picker("分段并发", selection: $session.connections) {
                 Text("跟随设置（\(model.settings.connections) 路）").tag(0)
                 ForEach(1...32, id: \.self) { Text("\($0) 路").tag($0) }
-            }.frame(maxWidth: 280, alignment: .leading)
-            if let error { Text(error).foregroundStyle(.orange).font(.callout) }
-            HStack { Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button(working ? "正在添加…" : "开始下载") { add() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(working || links.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.connected) }
-        }.padding(26).frame(width: 610)
-        .onAppear { directory = model.settings.directory }
+            }.disabled(session.working)
+            if let error = session.error { Text(error).font(.callout).foregroundStyle(.orange) }
+            Spacer(minLength: 0)
+            HStack {
+                Text("取消将停止这次下载").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(session.urls.count > 1 ? "取消此项" : "取消") { model.windows.cancel(session) }.keyboardShortcut(.cancelAction).disabled(session.working)
+                Button(session.working ? "正在处理…" : "开始下载") { model.windows.start(session) }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(session.working || session.loading || !model.connected || (session.taskID == nil && !session.validURL) || session.filename.isEmpty)
+            }
+        }.padding(26)
+        .task(id: session.currentURL) { await preview() }
     }
-    private func add() {
-        let urls = links.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        guard urls.allSatisfy({ guard let u = URL(string: $0) else { return false }; return ["http", "https"].contains(u.scheme ?? "") && u.host != nil }) else { error = "请检查链接，只支持 HTTP / HTTPS 文件地址。"; return }
-        working = true; error = nil
-        Task {
-            var remaining = urls
-            do {
-                for url in urls { _ = try await model.request("tasks.add", ["url": url, "directory": directory, "connections": connections]); remaining.removeFirst() }
-                dismiss()
-            } catch { links = remaining.joined(separator: "\n"); self.error = error.localizedDescription }
-            working = false
+    var source: String {
+        guard var components = URLComponents(string: session.currentURL) else { return "未知" }
+        components.query = nil; components.fragment = nil; components.user = nil; components.password = nil
+        return components.string ?? "未知"
+    }
+    private func info(_ key: String, _ value: String) -> some View {
+        GridRow { Text(key).foregroundStyle(.secondary); Text(value).lineLimit(2).truncationMode(.middle).textSelection(.enabled) }
+    }
+    private func preview() async {
+        guard session.taskID == nil else { return }
+        session.previewGeneration += 1; let generation = session.previewGeneration; let url = session.currentURL
+        session.preview = nil; session.previewError = nil; session.loading = false
+        guard session.validURL else { return }
+        if !session.nameEdited { session.filename = URL(string: url)?.lastPathComponent.removingPercentEncoding ?? "下载文件"; if session.filename.isEmpty { session.filename = "下载文件" } }
+        session.loading = true
+        do {
+            try await Task.sleep(nanoseconds: 350_000_000)
+            try Task.checkCancellation()
+            let value = try await model.request("tasks.preview", ["url": url])
+            guard generation == session.previewGeneration, !Task.isCancelled else { return }
+            let result = try JSONDecoder().decode(DownloadPreview.self, from: JSONSerialization.data(withJSONObject: value))
+            session.preview = result
+            if !session.nameEdited { session.filename = result.name }
+        } catch {
+            guard generation == session.previewGeneration, !Task.isCancelled else { return }
+            session.previewError = error.localizedDescription
         }
+        if generation == session.previewGeneration { session.loading = false }
     }
 }
 
@@ -96,7 +144,11 @@ struct SettingsView: View {
                     Text("在 Chrome 扩展管理页开启开发者模式，选择“加载已解压的扩展程序”，再选择“下载”中的“DSL Q Chrome 扩展”文件夹。请保留此文件夹，Chrome 会从这里加载扩展。也可复制路径，在选择窗口按 ⌘⇧G 粘贴。").font(.caption).foregroundStyle(.secondary)
                     Button("打开 Chrome 扩展管理") { openBrowser("Google Chrome", "chrome://extensions") }
                 }
-                Section("通知") { Button("允许下载完成通知") { model.enableNotifications() } }
+                Section("通知") {
+                    Toggle("下载开始时通知", isOn: $draft.notifyOnStart)
+                    Toggle("下载结束时通知（完成、失败或取消）", isOn: $draft.notifyOnFinish)
+                    NotificationSettingsView(notifications: model.notifications)
+                }
                 if let error { Section { Text(error).foregroundStyle(.orange) } }
             }.formStyle(.grouped)
         }.frame(width: 660, height: 710)

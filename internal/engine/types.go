@@ -14,6 +14,8 @@ const ChunkSize int64 = 4 << 20
 const ProtocolVersion = 1
 
 type Settings struct {
+	NotifyOnStart     bool     `json:"notifyOnStart"`
+	NotifyOnFinish    bool     `json:"notifyOnFinish"`
 	Connections       int      `json:"connections"`
 	MaxTasks          int      `json:"maxTasks"`
 	SpeedLimit        int64    `json:"speedLimit"`
@@ -28,7 +30,7 @@ type Settings struct {
 
 func Defaults() Settings {
 	h, _ := os.UserHomeDir()
-	return Settings{Connections: 8, MaxTasks: 3, Directory: filepath.Join(h, "Downloads"), CaptureMinBytes: 20 << 20,
+	return Settings{NotifyOnStart: true, NotifyOnFinish: true, Connections: 8, MaxTasks: 3, Directory: filepath.Join(h, "Downloads"), CaptureMinBytes: 20 << 20,
 		CaptureExtensions: DefaultCaptureExtensions(), ExcludedHosts: []string{}}
 }
 
@@ -96,6 +98,9 @@ type Chunk struct {
 }
 
 type Task struct {
+	ContentType       string    `json:"contentType,omitempty"`
+	RunID             string    `json:"runId,omitempty"`
+	Started           bool      `json:"started"`
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
 	Source            string    `json:"source"`
@@ -122,6 +127,9 @@ type Task struct {
 
 // Snapshot intentionally excludes credentials and internal resume metadata.
 type TaskView struct {
+	ContentType       string    `json:"contentType"`
+	RunID             string    `json:"runId"`
+	Started           bool      `json:"started"`
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
 	Source            string    `json:"source"`
@@ -144,5 +152,5 @@ func active(s string) bool {
 
 func view(t *Task) TaskView {
 	c := append([]Chunk{}, t.Chunks...)
-	return TaskView{t.ID, t.Name, t.Source, t.Path, t.State, t.Total, t.Received, t.Speed, t.Connections, t.ActiveConnections, c, t.Error, t.CreatedAt, t.Resumable}
+	return TaskView{t.ContentType, t.RunID, t.Started, t.ID, t.Name, t.Source, t.Path, t.State, t.Total, t.Received, t.Speed, t.Connections, t.ActiveConnections, c, t.Error, t.CreatedAt, t.Resumable}
 }

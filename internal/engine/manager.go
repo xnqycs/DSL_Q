@@ -67,6 +67,23 @@ func New(dir string, key []byte, onSnapshot func(Snapshot)) (*Manager, error) {
 			s.close()
 			return nil, e
 		}
+		if t.RunID == "" {
+			t.RunID = t.ID
+			t.Started = t.State != "prepared" && t.State != "awaiting_confirmation"
+		}
+		if t.State == "cancelling" {
+			t.State = "cancelled"
+			if t.TempPath == "" && t.HandoffState == "committed" {
+				t.State = "discarded"
+				t.Request = Request{HandoffID: t.Request.HandoffID}
+			}
+			if t.TempPath != "" {
+				_ = os.Remove(t.TempPath)
+			}
+			t.Chunks = []Chunk{}
+			t.Received = 0
+			t.BodyComplete = false
+		}
 		if active(t.State) {
 			t.State = "queued"
 		}
@@ -131,7 +148,7 @@ func (m *Manager) snapshotLocked() Snapshot {
 	s.Settings.CaptureExtensions = append([]string{}, m.settings.CaptureExtensions...)
 	s.Settings.ExcludedHosts = append([]string{}, m.settings.ExcludedHosts...)
 	for _, t := range m.tasks {
-		if t.HandoffState == "aborted" {
+		if t.HandoffState == "aborted" || t.State == "discarded" {
 			continue
 		}
 		s.Tasks = append(s.Tasks, view(t))
@@ -162,6 +179,7 @@ func (m *Manager) scheduleLocked() {
 		ctx, cancel := context.WithCancel(context.Background())
 		r := &running{cancel, make(chan struct{})}
 		m.runs[t.ID] = r
+		t.Started = true
 		t.State = "probing"
 		t.Error = ""
 		t.Received = completedBytes(t)
@@ -217,7 +235,7 @@ func (m *Manager) uniquePathLocked(dir, name string, own string) string {
 		_, e := os.Lstat(p)
 		used := !os.IsNotExist(e)
 		for id, t := range m.tasks {
-			if id != own && t.Path == p && t.HandoffState != "aborted" {
+			if id != own && t.Path == p && t.HandoffState != "aborted" && t.State != "discarded" && t.State != "cancelled" {
 				used = true
 			}
 		}
@@ -255,9 +273,6 @@ func (m *Manager) Add(ctx context.Context, req Request, prepare bool) (TaskView,
 	if dir == "" {
 		dir = settings.Directory
 	}
-	if e := os.MkdirAll(dir, 0700); e != nil {
-		return TaskView{}, errors.New("无法创建下载目录")
-	}
 	var metadata *probeResult
 	if prepare {
 		var e error
@@ -278,10 +293,13 @@ func (m *Manager) Add(ctx context.Context, req Request, prepare bool) (TaskView,
 		name, _ = url.PathUnescape(filepath.Base(u.Path))
 	}
 	name = safeName(name)
-	t := &Task{ID: newID(), Name: name, Source: u.Scheme + "://" + u.Host + u.EscapedPath(), State: "queued", Total: -1, Connections: req.Connections, Chunks: []Chunk{}, CreatedAt: time.Now(), Request: req}
+	t := &Task{ID: newID(), RunID: newID(), Name: name, Source: u.Scheme + "://" + u.Host + u.EscapedPath(), State: "queued", Total: -1, Connections: req.Connections, Chunks: []Chunk{}, CreatedAt: time.Now(), Request: req}
 	if prepare {
 		t.State = "prepared"
 		t.HandoffState = "prepared"
+		t.Total = metadata.total
+		t.ContentType = metadata.contentType
+		t.Resumable = metadata.resumable && metadata.total > ChunkSize
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -296,15 +314,14 @@ func (m *Manager) Add(ctx context.Context, req Request, prepare bool) (TaskView,
 			}
 		}
 	}
-	t.Path = m.uniquePathLocked(dir, name, "")
-	t.Name = filepath.Base(t.Path)
-	t.TempPath = filepath.Join(dir, ".dslq-"+t.ID+".part")
-	f, e := os.OpenFile(t.TempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return TaskView{}, errors.New("下载目录不可写")
+	if prepare {
+		// Persist ownership and metadata before Chrome cancels its download.
+		// Destination files are allocated only after the user confirms.
+		t.Path = filepath.Join(dir, name)
+	} else if e := m.allocateLocked(t, dir, name); e != nil {
+		return TaskView{}, e
 	}
-	f.Close()
-	if e = m.store.put(t.ID, t); e != nil {
+	if e := m.store.put(t.ID, t); e != nil {
 		os.Remove(t.TempPath)
 		return TaskView{}, errors.New("无法保存下载任务")
 	}
@@ -313,11 +330,17 @@ func (m *Manager) Add(ctx context.Context, req Request, prepare bool) (TaskView,
 }
 
 func (m *Manager) Action(id, action string) error {
+	if action == "cancel" {
+		return m.cancelTask(id)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t := m.tasks[id]
 	if t == nil {
 		return errors.New("任务不存在")
+	}
+	if t.State == "awaiting_confirmation" || t.State == "prepared" || t.State == "discarded" || t.State == "cancelling" {
+		return errors.New("请先在下载确认窗口中开始或取消任务")
 	}
 	switch action {
 	case "pause":
@@ -335,6 +358,13 @@ func (m *Manager) Action(id, action string) error {
 		if t.State == "prepared" {
 			return errors.New("浏览器尚未提交此任务")
 		}
+		if t.State == "cancelled" {
+			return errors.New("已取消的任务请从头下载")
+		}
+		if t.State == "failed" {
+			t.RunID = newID()
+			t.Started = false
+		}
 		t.State = "queued"
 		t.Error = ""
 	case "restart":
@@ -344,6 +374,8 @@ func (m *Manager) Action(id, action string) error {
 		if t.State == "completed" {
 			return errors.New("已完成的任务请重新添加")
 		}
+		t.RunID = newID()
+		t.Started = false
 		t.Chunks = []Chunk{}
 		t.Received = 0
 		t.Total = -1
@@ -355,8 +387,10 @@ func (m *Manager) Action(id, action string) error {
 		t.ForceSingle = false
 		t.State = "queued"
 		t.Error = ""
-		if e := os.Truncate(t.TempPath, 0); e != nil {
+		if f, e := os.OpenFile(t.TempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600); e != nil {
 			return errors.New("无法重置临时文件")
+		} else {
+			f.Close()
 		}
 	default:
 		return errors.New("未知任务操作")
@@ -381,12 +415,18 @@ func (m *Manager) SetConnections(id string, n int) error {
 
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
+	pending := m.tasks[id] != nil && m.tasks[id].State == "awaiting_confirmation"
+	m.mu.Unlock()
+	if pending {
+		return m.cancelTask(id)
+	}
+	m.mu.Lock()
 	t := m.tasks[id]
 	if t == nil {
 		m.mu.Unlock()
 		return nil
 	}
-	if t.State == "prepared" {
+	if t.State == "prepared" || t.State == "cancelling" {
 		m.mu.Unlock()
 		return errors.New("浏览器交接尚未完成，请稍后移除任务")
 	}
@@ -443,7 +483,7 @@ func (m *Manager) Handoff(id, action string) (map[string]any, error) {
 			return nil, errors.New("接管已撤销")
 		}
 		if t.HandoffState == "prepared" {
-			t.State = "queued"
+			t.State = "awaiting_confirmation"
 			t.HandoffState = "committed"
 			if e := m.store.put(t.ID, t); e != nil {
 				t.State = "prepared"

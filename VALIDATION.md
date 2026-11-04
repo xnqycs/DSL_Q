@@ -64,3 +64,38 @@
 真实站点边界：使用日常 Chrome 访问用户截图中的面板文件页时，页面返回 HTTP 502，无法触发该站实际下载。因此已验证的是具有同类特征的隔离面板用例，尚不能声称截图中的原站案例已经验收，也未将其故障归因于单一已确认根因。
 
 本机交付：已更新 `/Applications/DSL Q.app` 到 0.1.2，导出目录扩展更新到 0.1.1，并在日常 Chrome 中实际重新加载。弹窗确认已连接、网站已授权、自动接管已开启。原应用与扩展保存在 `.cache/installed-backups/capture-fix-_grj3k8_`；安装记录见 `.cache/capture-install.json`。先验证包含额外 `tar.gz` 的 10 项自定义列表未被迁移覆盖；用户随后明确选择合并，已通过设置界面补充并保存为 91 项，Chrome 弹窗再次确认 91 项规则、20 MiB 阈值及自动接管开启。原生设置初始文案也已修正，避免未检测就错误显示“尚未安装连接组件”。最终文案构建日志见 `.cache/capture-swift-final.log`。
+
+
+## 下载确认、独立窗口与生命周期通知（0.2.0）
+
+验证日期：2026-11-04（Asia/Singapore）。应用 0.2.0，扩展 0.1.2，macOS 14 最低版本不变。
+
+- 核心增加只读 `tasks.preview`、幂等 `tasks.confirm` 和取消操作。浏览器提交后持久化为 `awaiting_confirmation`，确认前不分配目标目录或临时文件。取消待确认项隐藏记录但保留交接凭据，崩溃恢复不会重建下载。
+- Go 竞态测试覆盖预览无副作用、确认前无下载、重启后继续等待、错误目录可修改后重试、重名保护、重复确认、取消清理、旧版空临时文件兼容、旧设置默认通知开启及运行标识。日志：`.cache/dialog-check-final.log`。
+- Swift 通知检查覆盖排队、极小/零字节快速完成、历史记录基线、暂停继续、手动重试、取消、授权允许/拒绝与重复请求；两种通知开关关闭期间的事件不会在重新开启后补发。
+- 真实 Chrome 联调确认了交接完成后等待用户、确认后只下载一份、取消确认后 Chrome 与核心均停止；保留上一版 Cookie、延迟响应、编码文件名、重定向和 Service Worker 恢复回归。记录：`.cache/confirmation-final-report.json`、`.cache/dialog-chrome-final.log`；最终 18 项检查还覆盖独立测试实例冷启动后仅等待确认、不开始下载或持有防休眠断言。
+- 独立测试应用使用不同 bundle ID、加密数据库和 `.cache/dialog-ui.pmsajw4f` 文件目录。实机操作验证批量逐项确认、真实目录选择器、文件改名、单任务并发、独立窗口、暂停继续、关闭后继续、双击重新打开、取消清理、确认窗关闭不创建任务、预览失败和下载失败反馈。
+- 关闭主窗口后，通过同一浏览器 IPC 入口提交接管，确认窗口自动出现；点击开始后正常下载。三个完成文件（64 MiB、32 MiB、2 MiB）SHA-256 均正确，取消任务没有输出文件或临时分片。
+- 系统通知实际投递并通过 `UNUserNotificationCenter.deliveredNotifications()` 读回：4 次开始、2 次完成、1 次取消、1 次失败；暂停继续没有重复开始通知。测试应用的通知权限已恢复为原先关闭状态。记录：`.cache/dialog-ui-report.json`、`.cache/dialog-ui.pmsajw4f/app.log`。
+- 实机发现并修正 macOS 自动将窗口合并为标签页的行为，下载窗口明确禁用自动标签。未知大小任务在暂停或失败后显示静止进度；窗口最小高度保证操作区可见。
+
+验证边界：完成文件的内容一致性使用隔离文件验证，未重新传输生产面板中的完整大文件。通知中心卡片的实际点击未自动化验证（当前电脑工具不支持 Fn 修饰键），点击任务跳转已实现。macOS 14 是部署目标，本次实机为 macOS 27.2。
+
+本机交付：`/Applications/DSL Q.app` 已更新到 0.2.0，日常 Chrome 扩展已重新加载为 0.1.2。原有完成记录、91 项接管规则、并发设置和防休眠设置均保留；开始/结束通知默认开启，系统通知已授权。备份位于 `.cache/installed-backups/dialogs-b5hxu08r`，安装收据为 `.cache/dialog-install.json`。
+
+实际面板补验：收尾时原面板已恢复可访问。通过截图中的同一右键下载入口触发 7.56 GB 压缩包，DSL Q 自动弹出确认窗口，正确显示文件名、大小、类型、续传能力和保存目录。点击取消后待确认项消失，资料库仍只有原先的完成记录；Chrome 下载记录明确显示这次下载已取消。本次没有点击“开始下载”，没有重下整个压缩包。
+
+
+## Chrome“另存为”抢先弹出修复（0.2.1）
+
+验证日期：2026-11-05（Asia/Singapore）。应用资源版本 0.2.1，扩展 0.1.3。
+
+- 开启 Chrome“下载前询问每个文件的保存位置”，将 Native Messaging 准备中的探测延迟 5 秒。修复前，扩展在 Chrome 下载仍为 `in_progress` / 暂停时就调用文件名回调，允许保存对话框出现；已稳定复现失败，见 `.cache/prompt-before.log`。
+- 扩展现在持有文件名回调，直到 Chrome 原任务取消或明确放弃接管。晚到的元数据有短暂等待机会；每个回调只释放一次。准备超过 13 秒时恢复浏览器并撤销迟到的准备结果，避免先出现 Chrome 保存窗口、之后又出现 DSL Q 确认。这个期限留在 [Chromium 的 15 秒文件名等待上限](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/extensions/api/downloads/downloads_api.cc)以内，不更改浏览器全局保存偏好。
+- 扩展 18 项测试和 TypeScript 检查通过，包括慢准备、事件乱序、认证失败恢复、超时后禁止再次接管、非 GET 和缺失元数据回退。原生构建、包签名检查通过：`.cache/prompt-build.log`。
+- 真实有界面 Chrome 156.0.8078.81，独立配置且询问保存位置开启：8 项检查通过。覆盖 5 秒探测、1 KiB PDF、手动发送仅进入 DSL Q 确认，以及认证失败、规则不匹配、14 秒探测超时保留 Chrome 且不产生迟到任务。测试只观测文件名回调释放时的真实 Chrome 状态，不修改保存对话框行为。记录：`.cache/prompt-final-report.json`、`.cache/prompt-final.log`。
+- 原有真实 Chrome 回归 17 项通过，含 Cookie/Referer、5 秒响应、未知长度、编码文件名、重定向、取消确认、SHA-256、POST、排除站点与两种 Service Worker 中断恢复：`.cache/prompt-regression-report.json`。本次只修改扩展接管时序，Go 与原生功能测试沿用上一节的通过记录；未重复执行 Go 竞态测试。
+- 日常 Chrome 已重新加载扩展 0.1.3，连接、授权及 91 项规则正常。“下载前询问每个文件的保存位置”经界面核实仍开启。通过原面板同一右键下载入口复测 7.56 GB 压缩包，没有出现 Chrome 保存对话框，扩展显示“已交给 DSL Q”，资料库新增等待确认项。原来已有一个确认窗口，因此新项按队列等待；只取消本次新增的测试项，保留原待确认项和原完成文件，没有开始重新传输整个压缩包。
+- 为保留用户当时打开的确认窗口，本机仅更新包内扩展、导出的扩展及版本资源并重新签名，没有退出应用。备份：`.cache/installed-backups/save-prompt-djkg494e`；收据：`.cache/prompt-install.json`。新安装包仍由完整构建产生。
+
+复现保存窗口专项：`.cache/venv/bin/python scripts/browser_smoke.py --headed --prompt-check`。成功接管只显示 DSL Q 确认；未匹配、认证失败或准备超时仍由 Chrome 处理并遵循其保存偏好，不保证所有网站/所有失败场景都没有浏览器提示。

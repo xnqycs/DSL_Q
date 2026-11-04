@@ -9,7 +9,6 @@ final class AppModel: ObservableObject {
     @Published var connected = false
     @Published var startupError: String?
     @Published var message: String?
-    @Published var showAdd = false
     @Published var showSettings = false
     @Published var integrationStatus = "连接状态请在 Chrome 扩展弹窗查看；更新应用后请重新导出并加载扩展。"
     let power = PowerController()
@@ -19,8 +18,9 @@ final class AppModel: ObservableObject {
     private var buffer = Data()
     private var pending: [String: CheckedContinuation<Any, Error>] = [:]
     private var quitting = false
-    private var completedIDs: Set<String> = []
-    private var receivedFirstSnapshot = false
+    lazy var windows = DownloadWindows(model: self)
+    let notifications = TaskNotifications()
+    var reopenMainWindow: (() -> Void)?
     var activeCount: Int { tasks.filter(\.isActive).count }
     var totalSpeed: Double { tasks.reduce(0) { $0 + $1.speed } }
     var extensionDirectory: URL { ChromeExtensionExport.directory() }
@@ -33,6 +33,12 @@ final class AppModel: ObservableObject {
     func start() {
         guard process == nil else { return }
         startupError = nil; quitting = false; buffer.removeAll()
+        notifications.onOpenTask = { [weak self] id in
+            guard let self else { return }
+            if self.tasks.contains(where: { $0.id == id }) { self.windows.openProgress(id) }
+            else { self.reopenMainWindow?(); NSApp.activate(ignoringOtherApps: true) }
+        }
+        notifications.refresh()
         do {
             let key: Data
             if ProcessInfo.processInfo.arguments.contains("--integration-test"), let raw = ProcessInfo.processInfo.environment["DSLQ_TEST_KEY"], let testKey = Data(base64Encoded: raw), testKey.count == 32 { key = testKey }
@@ -93,25 +99,19 @@ final class AppModel: ObservableObject {
     private func apply(_ object: Any) throws {
         let snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
         guard snapshot.protocol == 1 else { throw DSLQError.message("下载核心版本不匹配") }
-        let nowComplete = Set(snapshot.tasks.filter { $0.state == "completed" }.map(\.id))
-        if receivedFirstSnapshot {
-            for task in snapshot.tasks where nowComplete.subtracting(completedIDs).contains(task.id) { notify(task) }
-        }
-        receivedFirstSnapshot = true; completedIDs = nowComplete
         tasks = snapshot.tasks; settings = snapshot.settings
+        notifications.update(tasks, settings: settings)
+        windows.sync(tasks)
         updatePower()
     }
 
-    private func notify(_ task: DownloadTask) {
-        let name = task.name, id = task.id
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized else { return }
-            let content = UNMutableNotificationContent(); content.title = "下载完成"; content.body = name
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
-        }
+    func taskRequest(_ method: String, _ params: [String: Any]) async throws -> DownloadTask {
+        let value = try await request(method, params)
+        let task = try JSONDecoder().decode(DownloadTask.self, from: JSONSerialization.data(withJSONObject: value))
+        if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task } else { tasks.append(task) }
+        return task
     }
 
-    func enableNotifications() { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in } }
     func updatePower() { power.update(enabled: settings.preventIdleSleepWhileDownloading, activeCount: activeCount, connected: connected && !quitting) }
 
     private func disconnected() {
@@ -125,7 +125,15 @@ final class AppModel: ObservableObject {
     func perform(_ method: String, _ params: [String: Any] = [:]) {
         Task { do { _ = try await request(method, params) } catch { message = error.localizedDescription } }
     }
-    func action(_ task: DownloadTask, _ action: String) { perform("tasks.action", ["id": task.id, "action": action]) }
+    func action(_ task: DownloadTask, _ action: String) {
+        Task {
+            do {
+                if ["resume", "retry", "restart"].contains(action), settings.notifyOnStart || settings.notifyOnFinish { notifications.requestIfNeeded() }
+                _ = try await request("tasks.action", ["id": task.id, "action": action])
+                if ["resume", "retry", "restart"].contains(action) { windows.openProgress(task.id) }
+            } catch { message = error.localizedDescription }
+        }
+    }
     func saveSettings(_ value: DownloadSettings) async throws {
         _ = try await request("settings.update", try dictionary(value)); settings = value; updatePower()
     }
@@ -167,7 +175,7 @@ final class AppModel: ObservableObject {
     }
 
     func quit() async {
-        quitting = true; updatePower()
+        quitting = true; windows.prepareForQuit(); updatePower()
         if let child = process, child.isRunning {
             do { _ = try await request("shutdown") } catch { if child.isRunning { child.terminate() } }
         }

@@ -66,3 +66,30 @@ func TestNormalizeCaptureExtensions(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestOldSettingsEnableLifecycleNotifications(t *testing.T) {
+	dir := t.TempDir()
+	key := make([]byte, 32)
+	s, e := openStore(dir, key)
+	if e != nil {
+		t.Fatal(e)
+	}
+	encoded, _ := json.Marshal(Defaults())
+	var old map[string]any
+	json.Unmarshal(encoded, &old)
+	delete(old, "notifyOnStart")
+	delete(old, "notifyOnFinish")
+	if e = s.put("settings", old); e != nil {
+		t.Fatal(e)
+	}
+	s.close()
+	m, e := New(dir, key, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer m.Close()
+	settings := m.Snapshot().Settings
+	if !settings.NotifyOnStart || !settings.NotifyOnFinish {
+		t.Fatal("legacy settings disabled notifications by omission")
+	}
+}

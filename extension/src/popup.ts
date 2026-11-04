@@ -45,7 +45,7 @@ download.addEventListener("click", () => {
   void chrome.permissions.request({origins:[`${url.protocol}//${url.hostname}/*`]}).then(async granted => {
     if (!granted) { detail.textContent = "需要授权此站点，才能接管下载。"; return; }
     const response = await chrome.runtime.sendMessage({type:"download",url:url.href});
-    detail.textContent = response?.ok ? "下载已发起；请在下方查看交接结果，或在 Chrome 查看保留的下载。" : response?.error ?? "未能发起下载。";
+    detail.textContent = response?.ok ? "下载请求已发起；接管成功后，请在 DSL Q 确认文件信息并开始下载。" : response?.error ?? "未能发起下载。";
   }).catch(() => { detail.textContent = "未能发起下载，请检查客户端连接。"; });
 });
 chrome.storage.onChanged.addListener((changes, area) => {

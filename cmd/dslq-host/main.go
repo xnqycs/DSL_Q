@@ -71,7 +71,7 @@ func forward(b []byte, launch bool) ([]byte, error) {
 		}
 		args := []string{"-g", bundle}
 		if testMode {
-			args = []string{"-g", "--env", "DSLQ_TEST_DATA_DIR=" + os.Getenv("DSLQ_TEST_DATA_DIR"), "--env", "DSLQ_TEST_KEY=" + os.Getenv("DSLQ_TEST_KEY"), bundle, "--args", "--integration-test"}
+			args = []string{"-n", "-g", "--env", "DSLQ_TEST_DATA_DIR=" + os.Getenv("DSLQ_TEST_DATA_DIR"), "--env", "DSLQ_TEST_KEY=" + os.Getenv("DSLQ_TEST_KEY"), bundle, "--args", "--integration-test"}
 		}
 		if e = exec.Command("/usr/bin/open", args...).Run(); e != nil {
 			return nil, e
