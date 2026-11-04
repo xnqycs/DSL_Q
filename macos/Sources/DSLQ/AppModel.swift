@@ -23,7 +23,8 @@ final class AppModel: ObservableObject {
     private var receivedFirstSnapshot = false
     var activeCount: Int { tasks.filter(\.isActive).count }
     var totalSpeed: Double { tasks.reduce(0) { $0 + $1.speed } }
-    var extensionDirectory: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/extension") }
+    var extensionDirectory: URL { ChromeExtensionExport.directory() }
+    private var bundledExtensionDirectory: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/extension") }
     var dataDirectory: URL {
         if ProcessInfo.processInfo.arguments.contains("--integration-test"), let path = ProcessInfo.processInfo.environment["DSLQ_TEST_DATA_DIR"] { return URL(fileURLWithPath: path) }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/DSL Q")
@@ -135,6 +136,7 @@ final class AppModel: ObservableObject {
 
     func installBrowserHosts() {
         do {
+            try ChromeExtensionExport.export(from: bundledExtensionDirectory, to: extensionDirectory)
             let manifestURL = extensionDirectory.appendingPathComponent("extension-id.txt")
             let extensionID = try String(contentsOf: manifestURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             let host = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/dslq-host").path
@@ -144,8 +146,17 @@ final class AppModel: ObservableObject {
             let directory = base.appendingPathComponent("Google/Chrome/NativeMessagingHosts")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try content.write(to: directory.appendingPathComponent("local.dslq.download.json"), options: .atomic)
-            integrationStatus = "Chrome 连接组件已安装"
+            integrationStatus = "连接组件已安装，扩展已导出到“下载”文件夹"
             NSWorkspace.shared.open(extensionDirectory)
+        } catch { message = error.localizedDescription }
+    }
+
+    func copyExtensionPath() {
+        do {
+            try ChromeExtensionExport.export(from: bundledExtensionDirectory, to: extensionDirectory)
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(extensionDirectory.path, forType: .string)
+            integrationStatus = "扩展路径已复制，可在 Chrome 选择窗口按 ⌘⇧G 粘贴"
         } catch { message = error.localizedDescription }
     }
 

@@ -80,9 +80,13 @@ struct SettingsView: View {
                     HStack { Text("文件大小至少"); Spacer(); TextField("20", value: $sizeMiB, format: .number).frame(width: 80).multilineTextAlignment(.trailing); Text("MiB").foregroundStyle(.secondary) }
                     TextField("或匹配扩展名（逗号分隔）", text: $extensions)
                     TextField("排除站点（逗号分隔，如 example.com）", text: $excluded)
-                    HStack { Button("安装连接组件并显示扩展") { model.installBrowserHosts() }; Button("移除连接组件") { model.uninstallBrowserHosts() } }
+                    HStack {
+                        Button("安装连接组件并导出扩展") { model.installBrowserHosts() }
+                        Button("复制扩展路径") { model.copyExtensionPath() }
+                        Button("移除连接组件") { model.uninstallBrowserHosts() }
+                    }
                     Text(model.integrationStatus).font(.caption).foregroundStyle(.secondary)
-                    Text("在 Chrome 扩展管理页开启开发者模式，选择“加载已解压的扩展程序”，载入刚打开的文件夹。在扩展弹窗中检查连接状态，并授权网站访问。").font(.caption).foregroundStyle(.secondary)
+                    Text("在 Chrome 扩展管理页开启开发者模式，选择“加载已解压的扩展程序”，再选择“下载”中的“DSL Q Chrome 扩展”文件夹。请保留此文件夹，Chrome 会从这里加载扩展。也可复制路径，在选择窗口按 ⌘⇧G 粘贴。").font(.caption).foregroundStyle(.secondary)
                     Button("打开 Chrome 扩展管理") { openBrowser("Google Chrome", "chrome://extensions") }
                 }
                 Section("通知") { Button("允许下载完成通知") { model.enableNotifications() } }

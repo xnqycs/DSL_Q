@@ -40,3 +40,11 @@
 加入 `--cold-start` 可验证 Native Messaging 唤起原生客户端；执行前应关闭已有 DSL Q，测试将打开使用独立数据库的应用实例。它用合成密钥测试，不读取真实钥匙串密钥。
 
 用户将范围调整为仅 Chrome 后，已移除 Edge 界面入口和注册配置，并删除本次下载的 Edge 测试程序、安装包及独立测试配置；`/Applications` 中没有安装 Edge。
+
+## 0.1.1：扩展目录选择修复
+
+- 安装入口将包内资源导出到 `~/Downloads/DSL Q Chrome 扩展`，并提供复制路径按钮；Chrome 不再需要进入 `.app` 内部。
+- 新增导出检查覆盖普通目录类型、文件完整性、嵌套资源、重复更新、扩展身份保留以及同名用户文件夹保护。
+- `scripts/build.sh`、`scripts/check.sh` 与签名检查通过。导出的实际文件逐项比对，与包内扩展一致。
+- 在用户的 Chrome 目录选择器中定位到导出文件夹，确认“选择”按钮可用。
+- `/Applications/DSL Q.app` 已更新到 0.1.1；旧应用保留在项目 `.cache/installed-backups` 中。

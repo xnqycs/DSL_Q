@@ -19,8 +19,8 @@ import plistlib
 from pathlib import Path
 info={
  'CFBundleName':'DSL Q','CFBundleDisplayName':'DSL Q','CFBundleIdentifier':'local.dslq.app',
- 'CFBundleExecutable':'DSLQ','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.0',
- 'CFBundleVersion':'1','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,
+ 'CFBundleExecutable':'DSLQ','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.1',
+ 'CFBundleVersion':'2','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,
  'NSPrincipalClass':'NSApplication','CFBundleIconFile':'DSLQ',
  'NSDownloadsFolderUsageDescription':'将你选择的下载文件保存到下载目录。',
 }
