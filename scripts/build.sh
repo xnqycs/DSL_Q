@@ -2,6 +2,13 @@
 set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
+app_version="$(cat VERSION)"
+build_number="${DSLQ_BUILD_NUMBER:-5}"
+if [[ ! "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! "$build_number" =~ ^[0-9]+$ ]]; then
+  printf 'VERSION must be X.Y.Z and DSLQ_BUILD_NUMBER must be an integer.\n' >&2
+  exit 1
+fi
+export DSLQ_APP_VERSION="$app_version" DSLQ_BUILD_NUMBER="$build_number"
 mkdir -p dist .cache
 (cd extension && npm ci --no-audit --no-fund && npm run typecheck && npm run build)
 extension_id="$(tr -d '\n' < extension/dist/extension-id.txt)"
@@ -16,12 +23,12 @@ cp LICENSE NOTICE THIRD_PARTY_NOTICES.md "$app_dir/Contents/Resources/"
 mkdir -p "$app_dir/Contents/Resources/extension"
 cp extension/dist/* "$app_dir/Contents/Resources/extension/"
 python3 - <<'PY'
-import plistlib
+import os, plistlib
 from pathlib import Path
 info={
  'CFBundleName':'DSL Q','CFBundleDisplayName':'DSL Q','CFBundleIdentifier':'local.dslq.app',
- 'CFBundleExecutable':'DSLQ','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.2.1',
- 'CFBundleVersion':'5','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,
+ 'CFBundleExecutable':'DSLQ','CFBundlePackageType':'APPL','CFBundleShortVersionString':os.environ['DSLQ_APP_VERSION'],
+ 'CFBundleVersion':os.environ['DSLQ_BUILD_NUMBER'],'LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,
  'NSPrincipalClass':'NSApplication','CFBundleIconFile':'DSLQ',
  'NSDownloadsFolderUsageDescription':'将你选择的下载文件保存到下载目录。',
 }

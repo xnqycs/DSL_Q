@@ -8,6 +8,11 @@
 <p align="center"><strong>SwiftUI · Go · Chrome 扩展</strong><br>macOS 14+ · Apple Silicon · GPL-3.0-only</p>
 
 <p align="center">
+  <a href="https://github.com/xnqycs/DSL_Q/actions/workflows/build.yml"><img src="https://github.com/xnqycs/DSL_Q/actions/workflows/build.yml/badge.svg" alt="Build and Release 构建状态"></a>
+  <a href="https://github.com/xnqycs/DSL_Q/releases">下载 Release</a>
+</p>
+
+<p align="center">
   <a href="#功能">功能</a> ·
   <a href="#界面预览">界面预览</a> ·
   <a href="#快速开始">快速开始</a> ·
@@ -17,7 +22,7 @@
 
 ![DSL Q 下载资料库：正在下载、已暂停和已完成的示例任务，以及右侧任务详情](docs/images/download-library.jpg)
 
-> 当前通过源码构建使用。构建脚本生成的应用仅作本机 ad-hoc 签名，尚未公证，不属于可直接公开分发的安装包。
+> 自动构建和 Release 产物仅作 ad-hoc 签名，未经过 Apple Developer ID 签名或公证。首次打开可能被 macOS 安全机制拦截；请仅运行你信任来源的版本。
 
 ## 功能
 
@@ -49,6 +54,8 @@
 截图为隔离环境中的真实运行画面。文件、链接和目录均为本地演示数据，截图中的速度不代表性能测试结果。
 
 ## 快速开始
+
+如果 [Releases](https://github.com/xnqycs/DSL_Q/releases) 已有发布版本，可下载 `DSL-Q-vX.Y.Z-macos-arm64.zip`，解压后将 `DSL Q.app` 放入“应用程序”。直接使用构建好的应用不需要安装 Go、Node.js 或 Swift 工具链。以下步骤用于从源码构建。
 
 ### 1. 准备环境
 
@@ -173,6 +180,39 @@ scripts/          构建、检查和本地联调
 
 检查覆盖 Go 竞态测试、扩展类型检查与测试、Swift 构建及原生组件检查。已有验证结果和未验证范围见 [VALIDATION.md](VALIDATION.md)。
 
+### 自动构建与发布
+
+[Build and Release](.github/workflows/build.yml) 使用 GitHub 的 `macos-26` ARM64 runner，固定 Go 1.27.3 和 Node.js 22.23.4，复用项目构建与检查脚本。
+
+| 触发方式 | 执行内容 |
+| --- | --- |
+| 推送到 `main`、提交面向 `main` 的 PR | 运行检查，构建应用并上传 Actions 产物，保留 14 天。 |
+| Actions 页面手动运行 | 构建并上传产物，不发布 Release。 |
+| 推送 `vX.Y.Z` 标签 | 检查和构建通过后，自动发布 GitHub Release。 |
+| 推送 `vX.Y.Z-rc.1` 等标签 | 同样构建发布，并标记为 Pre-release。 |
+
+每份产物包含应用 ZIP、独立 Chrome 扩展 ZIP、对应提交的源码归档和 `SHA256SUMS` 校验文件。应用 ZIP 保留可执行权限和签名，许可证随应用与扩展分发。Release 先在草稿中上传附件，再公开发布；重跑不会覆盖已发布版本。
+
+发布新版本时，先将根目录的 [VERSION](VERSION) 改为目标版本并提交，再推送版本标签。例如：
+
+```sh
+# 确保 VERSION 已更新为 0.2.2，并已提交本次发布的所有改动
+git push origin main
+git tag -a v0.2.2 -m "Release v0.2.2"
+git push origin v0.2.2
+```
+
+标签的基础版本必须与 `VERSION` 一致，否则构建会停止。应用版本读取 `VERSION`，CI 构建号使用 Actions 运行编号；Chrome 扩展版本仍由 `extension/package.json` 管理。发布使用工作流自带的 `GITHUB_TOKEN`，仅发布任务授予 `contents: write`，无需另外配置 GitHub Token。
+
+如需在本地打包，先提交源码改动，构建后运行：
+
+```sh
+./scripts/build.sh
+./scripts/package.sh
+```
+
+文件生成在 `dist/packages/v<版本号>/`。脚本会检查版本、ARM64 架构、签名和许可证；已有同名产物时会停止，避免覆盖。
+
 <details>
 <summary><strong>构建细节</strong></summary>
 
@@ -180,7 +220,7 @@ scripts/          构建、检查和本地联调
 
 macOS 27 SDK 同时导出 `State` 属性包装器与同名宏，而 Command Line Tools 缺少 SwiftUI 宏插件；项目通过 `ViewState` 类型别名选择属性包装器，保持 macOS 14 部署目标。
 
-当前未提供公证后的公开分发包。通过网络分发应用或扩展时，须在下载位置提供对应版本的完整源码（包括构建脚本），或清楚标明其获取位置，并满足 GPL 第 6 条的要求。
+工作流当前不执行 Developer ID 签名或 Apple 公证。通过网络分发应用或扩展时，须在下载位置提供对应版本的完整源码（包括构建脚本），或清楚标明其获取位置，并满足 GPL 第 6 条的要求；自动发布的源码归档已包含本仓库的构建脚本。
 
 </details>
 
