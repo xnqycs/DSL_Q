@@ -84,11 +84,12 @@ struct MainView: View {
             }
             .searchable(text: $search, prompt: "搜索名称或来源")
         }
-        .onAppear {
+        .background(MainWindowObserver(delegate: delegate))
+        .onAppear { [delegate] in
             delegate.model = model
             let action = openWindow
             delegate.reopenMainWindow = { action(id: "main") }
-            model.reopenMainWindow = { action(id: "main") }
+            model.reopenMainWindow = { [weak delegate] in delegate?.showMainWindow() }
             model.start()
         }
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }

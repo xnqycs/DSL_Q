@@ -99,3 +99,11 @@
 - 为保留用户当时打开的确认窗口，本机仅更新包内扩展、导出的扩展及版本资源并重新签名，没有退出应用。备份：`.cache/installed-backups/save-prompt-djkg494e`；收据：`.cache/prompt-install.json`。新安装包仍由完整构建产生。
 
 复现保存窗口专项：`.cache/venv/bin/python scripts/browser_smoke.py --headed --prompt-check`。成功接管只显示 DSL Q 确认；未匹配、认证失败或准备超时仍由 Chrome 处理并遵循其保存偏好，不保证所有网站/所有失败场景都没有浏览器提示。
+
+## 关闭主窗口后隐藏 Dock（2026-11-05）
+
+- 主窗口关闭通知只绑定 SwiftUI 主窗口，不替换其 delegate。关闭后切换为 `.accessory`；菜单、设置、应用重开和通知回退共用主窗口打开入口，恢复 `.regular`。异步关闭回调带有代次校验，防止快速重开后再次隐藏 Dock。
+- `scripts/check.sh` 通过：Go 竞态检查、扩展类型检查及 18 项测试、Swift 构建、电源/导出/通知检查。最终改动另通过 Swift 构建、完整 `scripts/build.sh` 和应用签名验证。日志：`.cache/dock-check.log`、`.cache/dock-swift-final.log`、`.cache/dock-build.log`。
+- 从当前 `AppDelegate` 源码提取的一次性 AppKit 检查通过：可见窗口复用、关闭隐藏、辅助窗口打开/关闭不改变策略、辅助窗口仍可见时重开、连续 5 次快速关闭重开、最小化与恢复、最后窗口关闭后保持运行。记录：`.cache/dock-lifecycle.log`；该检查使用替身退出模型，不代表下载核心测试。
+- 隔离应用包、数据库和本地 HTTP 文件实机验证了鼠标 ×、⌘W、下载确认/进度窗口、设置入口恢复及键盘输入、访达重开、最小化和 ⌘Q 正常退出。主窗口关闭期间下载继续，32 MiB 文件最终 SHA-256 一致。报告：`.cache/dock-ui-report.json`。事件诊断只加入临时测试副本，没有进入交付构建。
+- 验证边界：运行环境为 Apple Silicon / macOS 27.2，macOS 14 仅通过部署目标编译。Dock 显示状态通过系统 `NSRunningApplication.activationPolicy` 核对；当前界面工具未提供 Dock 和状态栏菜单的可用界面，因此未直接验收菜单栏图标点选、菜单栏退出及通知中心卡片点击。其入口代码已核对，共用的主窗口恢复路径已实测。未替换 `/Applications/DSL Q.app`，未修改日常浏览器配置。
