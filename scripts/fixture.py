@@ -17,15 +17,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed=urlparse(self.path); query=parse_qs(parsed.query)
         if parsed.path=='/':
-            body=b'''<!doctype html><html><head><title>DSL Q integration fixtures</title></head><body><h1>Download fixtures</h1><a href="/auto.zip">Automatic archive</a><br><a href="/small.txt">Small file</a><br><a href="/cookie.zip">Cookie file</a><br><a href="/manual.bin?size=1048576">Manual file</a><br><a href="/recover.bin">Recovery file</a><br><a href="/abort.bin">Abort file</a><form method="post" action="/post.zip"><button>POST download</button></form></body></html>'''
+            body=b'''<!doctype html><html><head><title>DSL Q integration fixtures</title></head><body><h1>Download fixtures</h1><a href="/auto.zip">Automatic archive</a><br><a href="/small.unlisted">Small file</a><br><a href="/cookie.zip">Cookie file</a><br><a href="/manual.bin?size=1048576">Manual file</a><br><a href="/recover.bin">Recovery file</a><br><a href="/abort.bin">Abort file</a><br><a href="/download?filename=panel-archive.TAR.GZ&amp;delay=5&amp;unknown=1&amp;size=2097152">Panel archive</a><br><a href="/download?filename=small-document.pdf&amp;size=1024">Small document</a><br><a href="/download?filename=encoded&amp;size=2097152">Encoded filename</a><br><a href="/redirect-panel">Panel redirect</a><br><a href="/unreplayable.zip?size=2097152">Unreplayable login</a><br><form method="post" action="/post.zip"><button>POST download</button></form></body></html>'''
             self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(body)));self.send_header('Set-Cookie','session=dslq-test; Path=/; SameSite=Lax');self.end_headers();self.wfile.write(body);return
         if parsed.path=='/cookie.zip' and 'session=dslq-test' not in self.headers.get('Cookie',''):
             self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
+        if parsed.path=='/download' and ('session=dslq-test' not in self.headers.get('Cookie','') or not self.headers.get('Referer','')):
+            self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
+        if parsed.path=='/unreplayable.zip' and self.headers.get('Range')=='bytes=0-0':
+            self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
+        if parsed.path=='/redirect-panel':
+            self.send_response(302);self.send_header('Location','/download?filename=redirected.tar.gz&size=2097152');self.send_header('Content-Length','0');self.end_headers();return
         if parsed.path=='/redirect.zip':
             self.send_response(302);self.send_header('Location','/auto.zip');self.send_header('Content-Length','0');self.end_headers();return
-        size=int(query.get('size',[1024 if parsed.path=='/small.txt' else 24*1024*1024])[0])
-        self.send_file(Path(parsed.path).name or 'file.bin',size)
-    def send_file(self,name,size):
+        size=int(query.get('size',[1024 if parsed.path=='/small.unlisted' else 24*1024*1024])[0])
+        if 'Range' not in self.headers: time.sleep(float(query.get('delay',[0])[0]))
+        name=query.get('filename',[Path(parsed.path).name or 'file.bin'])[0]
+        self.send_file(name,size,unknown=query.get('unknown',['0'])[0]=='1')
+    def send_file(self,name,size,unknown=False):
         start,end=0,size-1; partial=False
         if self.command=='GET' and 'Range' in self.headers:
             try:
@@ -35,8 +43,10 @@ class Handler(BaseHTTPRequestHandler):
         if start>=size:
             self.send_response(416);self.send_header('Content-Range',f'bytes */{size}');self.send_header('Content-Length','0');self.end_headers();return
         self.send_response(206 if partial else 200)
-        self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition',f'attachment; filename="{name}"')
-        self.send_header('ETag','"dslq-fixture-v1"');self.send_header('Accept-Ranges','bytes');self.send_header('Content-Length',str(end-start+1))
+        self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Disposition',f'attachment; filename="{name}"' if name!='encoded' else "attachment; filename=archive.tar.gz; filename*=UTF-8''%E6%B5%8B%E8%AF%95.TAR.GZ")
+        self.send_header('ETag','"dslq-fixture-v1"');self.send_header('Accept-Ranges','bytes')
+        if not unknown or partial:self.send_header('Content-Length',str(end-start+1))
+        else:self.send_header('Connection','close');self.close_connection=True
         if partial:self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
         self.end_headers()
         try:

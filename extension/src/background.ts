@@ -1,14 +1,29 @@
-import { eligible, correlate, recoveryAction, type CaptureSettings, type ObservedRequest, type HandoffPhase } from "./rules.ts";
+import { captureReason, matchRequest, recoveryAction, responseFilename, basename, decisionFor,
+  type CaptureSettings, type ObservedRequest, type HandoffPhase, type CaptureDecision, type DecisionCode } from "./rules.ts";
+import { defaults } from "./defaults.ts";
+import { downloadQueue } from "./queue.ts";
 
 const HOST = "local.dslq.download";
-const defaults: CaptureSettings = { autoCapture: false, captureMinBytes: 20 * 1024 * 1024, captureExtensions: ["dmg", "pkg", "zip", "7z", "rar", "tar", "gz", "xz", "iso"], excludedHosts: [] };
+const filter = { urls: ["http://*/*", "https://*/*"] };
 let settings = defaults;
+let connectionError = "";
+let decisions: CaptureDecision[] = [];
 const records = new Map<string, ObservedRequest>();
 const handling = new Set<number>();
+const settled = new Set<number>();
 const manualURLs = new Set<string>();
-const ready = chrome.storage.session.get(["requests", "settings"]).then(data => {
-  for (const r of (data.requests ?? []) as ObservedRequest[]) if (Date.now() - r.time < 90_000) records.set(r.requestId, r);
+const candidates = new Map<number, { filename?: string }>();
+interface Pending { id: string; downloadId: number; phase: HandoffPhase; createdAt: number }
+const pendingDownloads = new Map<number, Pending>();
+const pendingKey = (id: string) => `handoff:${id}`;
+const ready = Promise.all([chrome.storage.session.get(["requests", "settings", "decisions", "settled"]), chrome.storage.local.get(null)]).then(([data, local]) => {
+  for (const r of (data.requests ?? []) as ObservedRequest[]) if (Date.now() - r.updatedAt < (r.completedAt ? 90_000 : 300_000)) records.set(r.requestId, r);
   settings = (data.settings as CaptureSettings | undefined) ?? defaults;
+  decisions = (data.decisions as CaptureDecision[] | undefined) ?? [];
+  for (const id of (data.settled as number[] | undefined) ?? []) settled.add(id);
+  for (const [key, value] of Object.entries(local)) {
+    if (key.startsWith("handoff:")) { const p = value as Pending; pendingDownloads.set(p.downloadId, p); }
+  }
 });
 
 async function native<T>(method: string, params: object = {}): Promise<T> {
@@ -16,98 +31,172 @@ async function native<T>(method: string, params: object = {}): Promise<T> {
   if (result?.protocol !== 1 || result?.error) throw new Error(result?.error?.message ?? "客户端版本不兼容");
   return result.result as T;
 }
-
-async function refreshSettings(): Promise<boolean> {
+function connectionMessage(error: unknown): string {
+  const message = String(error);
+  if (/not found|not registered|forbidden/i.test(message)) return "未找到可用的连接组件，请在客户端重新安装浏览器集成。";
+  return "客户端未连接，请打开 DSL Q；若仍失败，请重新安装连接组件。";
+}
+async function refreshSettings(launch = false): Promise<boolean> {
+  await ready;
   try {
     // A background check must not reopen an explicitly quit application.
-    await native("browser.ping");
+    if (!launch) await native("browser.ping");
     settings = await native<CaptureSettings>("browser.settings");
     await chrome.storage.session.set({ settings });
-    await chrome.action.setBadgeText({ text: "" });
+    connectionError = "";
+    if (!pendingDownloads.size) await chrome.action.setBadgeText({ text: "" });
     return true;
-  } catch { return false; }
+  } catch (error) { connectionError = connectionMessage(error); return false; }
 }
 
-async function persistRequests() {
-  for (const [id, r] of records) if (Date.now() - r.time > 90_000) records.delete(id);
-  while (records.size > 256) records.delete(records.keys().next().value!);
-  await chrome.storage.session.set({ requests: [...records.values()] });
-}
-
-chrome.webRequest.onBeforeRequest.addListener(details => {
-  void (async () => {
-    await ready;
-    if (!settings.autoCapture && !manualURLs.has(details.url) && !records.has(details.requestId)) return;
-    const existing = records.get(details.requestId);
-    records.set(details.requestId, { requestId: details.requestId, urls: [...new Set([...(existing?.urls ?? []), details.url])], method: details.method,
-      originalMethod: existing?.originalMethod ?? details.method, time: existing?.time ?? details.timeStamp, headers: {} });
-    await persistRequests();
-  })();
-}, { urls: ["http://*/*", "https://*/*"] });
-
-chrome.webRequest.onSendHeaders.addListener(details => {
-  void (async () => {
-    await ready;
-    const record = records.get(details.requestId); if (!record) return;
-    record.headers = {};
-    for (const h of details.requestHeaders ?? []) {
-      const name = h.name.toLowerCase();
-      if (["cookie", "referer", "user-agent", "accept", "accept-language", "origin"].includes(name) && h.value) record.headers[h.name] = h.value;
+let requestSave = Promise.resolve();
+function persistRequests() {
+  const now = Date.now();
+  for (const [id, r] of records) {
+    // Keep waiting requests across a slow response; completed records have a
+    // short reuse window. A record is claimed by a single download on handoff.
+    if (now - r.updatedAt > (r.completedAt ? 90_000 : 300_000)) records.delete(id);
+  }
+  if (records.size > 1024) {
+    for (const [id, r] of records) {
+      if (r.completedAt && !r.filename) records.delete(id);
+      if (records.size <= 1024) break;
     }
-    await persistRequests();
-  })();
-}, { urls: ["http://*/*", "https://*/*"] }, ["requestHeaders", "extraHeaders"]);
+  }
+  requestSave = requestSave.catch(() => {}).then(() => chrome.storage.session.set({ requests: [...records.values()] }));
+  return requestSave;
+}
+function observe(work: () => void) {
+  void ready.then(() => { work(); return persistRequests(); }).catch(() => {});
+  return undefined;
+}
+function wakeCandidates() { for (const id of candidates.keys()) enqueue(id); }
 
-interface Pending { id: string; downloadId: number; phase: HandoffPhase; createdAt: number }
-const pendingKey = (id: string) => `handoff:${id}`;
-async function savePending(p: Pending) { await chrome.storage.local.set({ [pendingKey(p.id)]: p }); }
-async function forget(p: Pending) { await chrome.storage.local.remove(pendingKey(p.id)); }
+chrome.webRequest.onBeforeRequest.addListener(details => observe(() => {
+  if (!settings.autoCapture && !manualURLs.has(details.url) && !records.has(details.requestId)) return;
+  const old = records.get(details.requestId);
+  records.set(details.requestId, { requestId: details.requestId,
+    urls: [...new Set([...(old?.urls ?? []), details.url])], method: details.method,
+    originalMethod: old?.originalMethod ?? details.method, time: old?.time ?? Date.now(), updatedAt: Date.now(), headers: {} });
+}), filter);
+chrome.webRequest.onSendHeaders.addListener(details => observe(() => {
+  const record = records.get(details.requestId); if (!record) return;
+  record.updatedAt = Date.now(); record.headers = {};
+  record.headersOrigin = new URL(details.url).origin;
+  for (const h of details.requestHeaders ?? []) {
+    if (["cookie", "referer", "user-agent", "accept", "accept-language", "origin", "authorization"].includes(h.name.toLowerCase()) && h.value) record.headers[h.name] = h.value;
+  }
+}), filter, ["requestHeaders", "extraHeaders"]);
+chrome.webRequest.onHeadersReceived.addListener(details => observe(() => {
+  const record = records.get(details.requestId); if (!record) return;
+  record.updatedAt = Date.now();
+  if (details.statusCode >= 300 && details.statusCode < 400) return;
+  record.responseUrl = details.url; record.responseAt = Date.now();
+  const headers = new Map((details.responseHeaders ?? []).map(h => [h.name.toLowerCase(), h.value ?? ""]));
+  record.filename = responseFilename(headers.get("content-disposition") ?? "");
+  const length = Number(headers.get("content-length") ?? -1);
+  record.totalBytes = Number.isSafeInteger(length) && length >= 0 ? length : -1;
+  wakeCandidates();
+}), filter, ["responseHeaders"]);
+for (const event of [chrome.webRequest.onCompleted, chrome.webRequest.onErrorOccurred]) {
+  event.addListener(details => observe(() => {
+    const record = records.get(details.requestId); if (!record) return;
+    record.completedAt = record.updatedAt = Date.now(); wakeCandidates();
+  }), filter);
+}
+
+async function note(item: {id: number; url: string; filename?: string}, code: DecisionCode) {
+  const previous = decisions.find(d => d.downloadId === item.id);
+  if (previous?.code === code && previous.filename === basename(item.filename ?? "")) return;
+  decisions = [decisionFor(item, code), ...decisions.filter(d => d.downloadId !== item.id)].slice(0, 20);
+  await chrome.storage.session.set({ decisions });
+}
+async function finish(id: number) {
+  settled.add(id); candidates.delete(id);
+  while (settled.size > 500) settled.delete(settled.values().next().value!);
+  await chrome.storage.session.set({ settled: [...settled] });
+}
+async function badge() {
+  await chrome.action.setBadgeText({ text: "!" });
+  await chrome.action.setBadgeBackgroundColor({ color: "#d97706" });
+}
+async function savePending(p: Pending) {
+  pendingDownloads.set(p.downloadId, p);
+  await chrome.storage.local.set({ [pendingKey(p.id)]: p });
+}
+async function forget(p: Pending) {
+  await finish(p.downloadId);
+  await chrome.storage.local.remove(pendingKey(p.id));
+  pendingDownloads.delete(p.downloadId);
+}
 async function resumeBrowser(p: Pending) {
   const [item] = await chrome.downloads.search({ id: p.downloadId });
   if (item?.state === "in_progress" && item.paused) await chrome.downloads.resume(item.id);
 }
 
+const queue = downloadQueue(processDownload);
+function enqueue(id: number, filename?: string): Promise<void> {
+  if (settled.has(id)) return Promise.resolve();
+  candidates.set(id, { ...candidates.get(id), ...(filename ? { filename } : {}) });
+  return queue(id).catch(() => badge());
+}
 async function processDownload(id: number) {
-  if (handling.has(id)) return;
-  handling.add(id);
+  await ready;
+  if (settled.has(id) || pendingDownloads.has(id)) return;
   let pending: Pending | undefined;
+  let item: chrome.downloads.DownloadItem | undefined;
+  handling.add(id);
   try {
-    await ready;
-    const [item] = await chrome.downloads.search({ id });
-    if (!item || item.paused) return;
+    [item] = await chrome.downloads.search({ id });
+    if (!item) { candidates.delete(id); return; }
+    if (item.state !== "in_progress") {
+      candidates.delete(id);
+      if (!decisions.some(d => d.downloadId === id)) await note(item, "browser_finished");
+      return;
+    }
+    if (item.paused) return;
     const forced = item.byExtensionId === chrome.runtime.id;
-    if (!eligible(item, settings, forced)) return;
-    if (item.byExtensionId && !forced) return;
-    // Chrome does not expose webRequest events for downloads initiated by
-    // this extension. Those are known GETs from our explicit manual action;
-    // if authentication cannot be replayed, prepare fails and Chrome resumes.
-    const record = correlate(item, [...records.values()]) ?? (forced ? {headers:{}} : undefined);
-    // Download IDs have no direct webRequest ID; ambiguous matches stay in browser.
-    if (!record) return;
-    pending = { id: crypto.randomUUID(), downloadId: item.id, phase: "paused", createdAt: Date.now() };
+    const match = matchRequest(item, [...records.values()]);
+    const record = match.record;
+    // Chrome (and managed download destinations) can expose a temporary UUID or
+    // .crdownload path. Content-Disposition identifies the actual file type.
+    item = { ...item, filename: record?.filename || candidates.get(id)?.filename || item.filename,
+      totalBytes: item.totalBytes >= 0 ? item.totalBytes : record?.totalBytes ?? -1 };
+    const reason = captureReason(item, settings, forced);
+    if (reason) { await note(item, reason); return; }
+    if (item.byExtensionId && !forced) { await note(item, "other_extension"); return; }
+    // Only our explicit downloads.download action is a known GET without
+    // webRequest evidence. Never assume an unobserved website request is GET.
+    if (!record && !forced) { await note(item, match.reason!); return; }
+    const url = item.finalUrl || item.url;
+    const headers = record?.headersOrigin === new URL(url).origin ? record.headers : {};
+    if (record) { record.downloadId = id; await persistRequests(); }
+    pending = { id: crypto.randomUUID(), downloadId: id, phase: "paused", createdAt: Date.now() };
     await savePending(pending);
-    await chrome.downloads.pause(item.id);
-    const [paused] = await chrome.downloads.search({ id: item.id });
+    await chrome.downloads.pause(id);
+    const [paused] = await chrome.downloads.search({ id });
     if (!paused || paused.state !== "in_progress" || !paused.paused || paused.danger !== "safe") throw new Error("原下载状态已变化");
-    const filename = item.filename?.split(/[\\/]/).at(-1) ?? "";
-    await native("browser.prepare", { url: item.finalUrl || item.url, filename, headers: record.headers, handoffId: pending.id });
+    await native("browser.prepare", { url, filename: basename(item.filename), headers, handoffId: pending.id });
     pending.phase = "prepared"; await savePending(pending);
-    const [current] = await chrome.downloads.search({ id: item.id });
+    const [current] = await chrome.downloads.search({ id });
     if (!current || current.state !== "in_progress" || current.danger !== "safe") throw new Error("原下载已结束");
     pending.phase = "cancelling"; await savePending(pending);
-    await chrome.downloads.cancel(item.id);
+    await chrome.downloads.cancel(id);
     pending.phase = "cancelled"; await savePending(pending);
     await native("browser.commit", { handoffId: pending.id });
-    await forget(pending);
-  } catch {
-    if (pending) await recover(pending).catch(async () => {
-      await chrome.action.setBadgeText({ text: "!" });
-      await chrome.action.setBadgeBackgroundColor({ color: "#d97706" });
-    });
+    await note(item, "captured"); await forget(pending);
+  } catch (error) {
+    if (pending) {
+      try {
+        const action = await recover(pending);
+        if (item) await note(item, action === "commit" || action === "done" ? "captured" :
+          /授权|登录|返回网页|401|403/.test(String(error)) ? "auth_failed" : "prepare_failed");
+      } catch { if (item) await note(item, "handoff_pending"); await badge(); }
+    } else if (item) await note(item, "prepare_failed");
   } finally { handling.delete(id); }
 }
 
-async function recover(p: Pending) {
+async function recover(p: Pending): Promise<"commit" | "abort" | "done"> {
   const [item] = await chrome.downloads.search({ id: p.downloadId });
   let status: { state: string };
   try { status = await native("browser.status", { handoffId: p.id }); }
@@ -116,29 +205,46 @@ async function recover(p: Pending) {
     throw new Error("等待客户端恢复");
   }
   const action = recoveryAction(p.phase, item?.state ?? "missing", status.state);
-  if (action === "commit") { await native("browser.commit", { handoffId: p.id }); await forget(p); }
-  else if (action === "abort") { await native("browser.abort", { handoffId: p.id }); await resumeBrowser(p); await forget(p); }
-  else if (action === "done") await forget(p);
-  else throw new Error("交接状态尚未确认，请保持客户端开启");
+  if (action === "commit") await native("browser.commit", { handoffId: p.id });
+  else if (action === "abort") { await native("browser.abort", { handoffId: p.id }); await resumeBrowser(p); }
+  else if (action !== "done") throw new Error("交接状态尚未确认，请保持客户端开启");
+  if (item) await note(item, action === "abort" ? "prepare_failed" : "captured");
+  await forget(p);
+  return action;
 }
-
 async function recoverAll() {
+  await ready;
+  // Read storage again so persisted handoffs are also recoverable after reload.
   const saved = await chrome.storage.local.get(null);
   for (const [key, value] of Object.entries(saved)) {
     if (!key.startsWith("handoff:")) continue;
     const p = value as Pending;
-    if (!handling.has(p.downloadId)) await recover(p).catch(async () => { await chrome.action.setBadgeText({text:"!"}); await chrome.action.setBadgeBackgroundColor({color:"#d97706"}); });
+    pendingDownloads.set(p.downloadId, p);
+    if (handling.has(p.downloadId)) continue;
+    handling.add(p.downloadId);
+    try { await recover(p); }
+    catch { await badge(); }
+    finally { handling.delete(p.downloadId); }
   }
 }
 
-chrome.downloads.onCreated.addListener(item => { void processDownload(item.id); });
-chrome.downloads.onChanged.addListener(delta => {
-  if (delta.filename || delta.totalBytes || delta.danger || delta.finalUrl) void processDownload(delta.id);
+chrome.downloads.onCreated.addListener(item => { void enqueue(item.id); });
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // Let filename/response metadata be evaluated before a small download can
+  // finish. Always release Chrome's filename callback, even if native IPC stalls.
+  let released = false;
+  const release = () => { if (!released) { released = true; suggest(); } };
+  const timer = setTimeout(release, 1500);
+  void enqueue(item.id, item.filename).finally(() => { clearTimeout(timer); release(); });
+  return true;
 });
+chrome.downloads.onChanged.addListener(delta => {
+  if (delta.filename || delta.totalBytes || delta.danger || delta.finalUrl || delta.state || delta.paused) void enqueue(delta.id, delta.filename?.current);
+});
+chrome.downloads.onErased.addListener(id => { candidates.delete(id); });
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => chrome.contextMenus.create({ id: "send-dslq", title: "使用 DSL Q 下载链接", contexts: ["link"] }));
-  void chrome.alarms.create("refresh", { periodInMinutes: 0.5 });
   void refreshSettings();
 });
 chrome.runtime.onStartup.addListener(() => { void refreshSettings(); void recoverAll(); });
@@ -150,11 +256,9 @@ chrome.contextMenus.onClicked.addListener(info => {
   try { const parsed = new URL(url); if (!["http:","https:"].includes(parsed.protocol)) return; origin = `${parsed.protocol}//${parsed.hostname}/*`; } catch { return; }
   void (async () => {
     const granted = await chrome.permissions.request({ origins: [origin] });
-    if (!granted) return;
-    await queueManualDownload(url);
-  })();
+    if (granted) await queueManualDownload(url);
+  })().catch(() => badge());
 });
-
 async function queueManualDownload(url: string): Promise<void> {
   const parsed = new URL(url);
   if (!["http:","https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("只支持 HTTP / HTTPS 文件链接");
@@ -162,20 +266,24 @@ async function queueManualDownload(url: string): Promise<void> {
   try { await chrome.downloads.download({ url }); }
   finally { setTimeout(() => manualURLs.delete(url), 15_000); }
 }
-
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(""))) return;
   if (message?.type === "download" && typeof message.url === "string") {
-    queueManualDownload(message.url).then(() => respond({ok:true})).catch(e => respond({ok:false,error:String(e.message)}));
+    queueManualDownload(message.url).then(() => respond({ok:true})).catch(() => respond({ok:false,error:"未能发起下载，请检查客户端连接。"}));
     return true;
   }
-  if (message?.type === "connect") {
-    native<CaptureSettings>("browser.settings").then(async s => { settings = s; await chrome.storage.session.set({ settings }); await recoverAll(); respond({ ok: true, settings }); }).catch(e => respond({ ok: false, error: String(e.message) }));
+  if (message?.type === "connect" || message?.type === "status") {
+    void (async () => {
+      const ok = await refreshSettings(message.type === "connect");
+      if (ok) await recoverAll();
+      const permissions = await chrome.permissions.contains({ origins: filter.urls });
+      respond({ ok, settings, permissions, error: connectionError, decisions });
+    })().catch(() => respond({ok:false,error:"无法检查扩展状态，请重新加载扩展。",decisions}));
     return true;
-  }
-  if (message?.type === "status") {
-    refreshSettings().then(ok => respond({ ok, settings })); return true;
   }
 });
-
-void ready.then(async () => { await refreshSettings(); await recoverAll(); });
+void ready.then(async () => {
+  await chrome.alarms.create("refresh", { periodInMinutes: 0.5 });
+  await refreshSettings(); await recoverAll();
+  for (const item of await chrome.downloads.search({ state: "in_progress" })) void enqueue(item.id);
+}).catch(() => badge());

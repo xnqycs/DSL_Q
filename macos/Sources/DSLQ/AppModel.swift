@@ -11,7 +11,7 @@ final class AppModel: ObservableObject {
     @Published var message: String?
     @Published var showAdd = false
     @Published var showSettings = false
-    @Published var integrationStatus = "尚未安装浏览器连接组件"
+    @Published var integrationStatus = "连接状态请在 Chrome 扩展弹窗查看；更新应用后请重新导出并加载扩展。"
     let power = PowerController()
     private var process: Process?
     private var input: FileHandle?

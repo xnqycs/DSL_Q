@@ -29,7 +29,7 @@ type Settings struct {
 func Defaults() Settings {
 	h, _ := os.UserHomeDir()
 	return Settings{Connections: 8, MaxTasks: 3, Directory: filepath.Join(h, "Downloads"), CaptureMinBytes: 20 << 20,
-		CaptureExtensions: []string{"dmg", "pkg", "zip", "7z", "rar", "tar", "gz", "xz", "iso"}, ExcludedHosts: []string{}}
+		CaptureExtensions: DefaultCaptureExtensions(), ExcludedHosts: []string{}}
 }
 
 func (s Settings) Validate() error {

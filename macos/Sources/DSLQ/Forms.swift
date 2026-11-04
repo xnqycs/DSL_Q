@@ -78,7 +78,14 @@ struct SettingsView: View {
                 Section("浏览器接管") {
                     Toggle("按规则自动接管浏览器下载", isOn: $draft.autoCapture)
                     HStack { Text("文件大小至少"); Spacer(); TextField("20", value: $sizeMiB, format: .number).frame(width: 80).multilineTextAlignment(.trailing); Text("MiB").foregroundStyle(.secondary) }
-                    TextField("或匹配扩展名（逗号分隔）", text: $extensions)
+                    TextField("或匹配扩展名（逗号或空格分隔）", text: $extensions)
+                    HStack {
+                        Text("已配置 \(DownloadSettings.normalizedExtensions(extensions).count) 种文件类型").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("补充常见类型") {
+                            extensions = DownloadSettings.normalizedExtensions(extensions + " " + DownloadSettings.commonCaptureExtensions.joined(separator: " ")).joined(separator: ", ")
+                        }
+                    }
                     TextField("排除站点（逗号分隔，如 example.com）", text: $excluded)
                     HStack {
                         Button("安装连接组件并导出扩展") { model.installBrowserHosts() }
@@ -98,7 +105,7 @@ struct SettingsView: View {
     private func save() {
         guard speedKiB >= 0, sizeMiB >= 0, speedKiB < Int.max / 1024, sizeMiB < Int.max / (1024 * 1024) else { error = "限速和接管阈值必须是有效的非负数"; return }
         draft.speedLimit = Int64(speedKiB) * 1024; draft.captureMinBytes = Int64(sizeMiB) * 1024 * 1024
-        draft.captureExtensions = extensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }.filter { !$0.isEmpty }
+        draft.captureExtensions = DownloadSettings.normalizedExtensions(extensions)
         draft.excludedHosts = excluded.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
         draft.preventIdleSleepWhileDownloading = model.settings.preventIdleSleepWhileDownloading
         saving = true

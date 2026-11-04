@@ -82,6 +82,12 @@ func New(dir string, key []byte, onSnapshot func(Snapshot)) (*Manager, error) {
 		s.close()
 		return nil, e
 	}
+	if migrateCaptureExtensions(&m.settings) {
+		if e = m.store.put("settings", m.settings); e != nil {
+			s.close()
+			return nil, e
+		}
+	}
 	m.updateLimiter()
 	go m.loop()
 	return m, nil
@@ -506,6 +512,7 @@ func (m *Manager) waitBandwidth(ctx context.Context, n int) error {
 	}
 }
 func (m *Manager) UpdateSettings(s Settings) error {
+	s.CaptureExtensions = NormalizeCaptureExtensions(s.CaptureExtensions)
 	if e := s.Validate(); e != nil {
 		return e
 	}

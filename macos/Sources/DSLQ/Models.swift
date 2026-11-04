@@ -14,7 +14,23 @@ struct DownloadSettings: Codable, Equatable {
     var preventIdleSleepWhileDownloading = false
     var autoCapture = false
     var captureMinBytes: Int64 = 20 * 1024 * 1024
-    var captureExtensions = ["dmg", "pkg", "zip", "7z", "rar", "tar", "gz", "xz", "iso"]
+    static let commonCaptureExtensions = """
+zip 7z rar tar gz bz2 xz zst tgz tbz2 txz lz lzma lz4 cab
+dmg pkg iso img exe msi msix apk deb rpm appimage
+pdf doc docx xls xlsx ppt pptx odt ods odp rtf txt csv tsv epub mobi azw3
+mp3 m4a aac wav flac ogg opus mp4 mkv mov avi webm m4v mpeg mpg ts
+jpg jpeg png gif webp heic heif avif tif tiff bmp svg ico psd
+json yaml yml xml toml ini log sql db sqlite bak patch diff jar war wasm bin
+""".split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    var captureExtensions = Self.commonCaptureExtensions
+
+    static func normalizedExtensions(_ text: String) -> [String] {
+        var seen = Set<String>()
+        return text.lowercased().split(whereSeparator: { $0.isWhitespace || ",，;；".contains($0) }).compactMap {
+            let value = String($0.drop(while: { $0 == "." }))
+            return !value.isEmpty && seen.insert(value).inserted ? value : nil
+        }
+    }
     var excludedHosts: [String] = []
 }
 

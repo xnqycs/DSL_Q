@@ -50,8 +50,12 @@ def check_hash(path,size):
     assert hashlib.sha256(path.read_bytes()).hexdigest()==expected.hexdigest()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--browser',default='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');parser.add_argument('--label',default='chrome');parser.add_argument('--headed',action='store_true');parser.add_argument('--cold-start',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--browser',default='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');parser.add_argument('--label',default='chrome');parser.add_argument('--headed',action='store_true');parser.add_argument('--cold-start',action='store_true');parser.add_argument('--trace-handoff',action='store_true');parser.add_argument('--small-only',action='store_true');args=parser.parse_args()
     work=Path(tempfile.mkdtemp(prefix='bc.',dir=ROOT/'.cache'));profile=work/'profile';profile.mkdir();data=work/'data';downloads=work/'downloads'
+    # Exercise Chrome's real filename pipeline. Playwright's allowAndName mode
+    # forces UUID filenames and bypasses extension filename determination.
+    (profile/'Default').mkdir()
+    (profile/'Default/Preferences').write_text(json.dumps({'download':{'default_directory':str(work/'browser-downloads'),'prompt_for_download':False}}))
     core=Core(data);server=start_server();base=f'http://127.0.0.1:{server.server_port}'
     settings=core.snapshot['settings'];settings.update(directory=str(downloads),autoCapture=True,connections=8,preventIdleSleepWhileDownloading=True)
     core.call('settings.update',settings)
@@ -73,10 +77,21 @@ def main():
                 args=['--enable-unsafe-extension-debugging','--no-first-run','--no-default-browser-check'],ignore_default_args=['--disable-extensions'])
             try:
                 cdp=context.browser.new_browser_cdp_session()
+                cdp.send('Browser.setDownloadBehavior',{'behavior':'default','eventsEnabled':True})
                 loaded=cdp.send('Extensions.loadUnpacked',{'path':str(runtime_extension)})
                 assert loaded['id']==extension_id,loaded
                 print('Loaded extension',loaded,flush=True)
                 worker=context.service_workers[0] if context.service_workers else context.wait_for_event('serviceworker')
+                if args.trace_handoff:
+                    context.on('console',lambda message:print('Browser trace:',message.text,flush=True))
+                    worker.evaluate('''() => {
+                        for(const method of ['pause','cancel','resume','search']) {
+                            const original=chrome.downloads[method].bind(chrome.downloads);
+                            chrome.downloads[method]=async (...args)=>{try {const result=await original(...args);console.log('downloads.'+method,JSON.stringify(args),method==='search'?JSON.stringify(result.map(i=>({id:i.id,state:i.state,paused:i.paused,received:i.bytesReceived,total:i.totalBytes}))):'ok');return result;}catch(e){console.log('downloads.'+method,'FAILED',e.message);throw e;}};
+                        }
+                        const native=chrome.runtime.sendNativeMessage.bind(chrome.runtime);
+                        chrome.runtime.sendNativeMessage=async (...args)=>{const result=await native(...args);console.log(args[1].method,result.error?.message??'ok');return result;};
+                    }''')
                 popup=context.new_page();popup.on('pageerror',lambda e:print('Popup error:',e,flush=True));popup.goto(f'chrome-extension://{extension_id}/popup.html');popup.wait_for_load_state('networkidle')
                 service_workers=context.new_cdp_session(popup);versions={};worker_states=[]
                 def remember_versions(event):
@@ -95,6 +110,12 @@ def main():
                 report['checks'].append('loopback-only test manifest permission')
                 page=context.new_page();page.goto(base);page.wait_for_load_state('networkidle')
                 print('Fixture:',page.locator('body').inner_text(),flush=True)
+                if args.small_only:
+                    page.get_by_role('link',name='Small document',exact=True).click()
+                    task=wait(lambda:next((t for t in core.call('snapshot')['tasks'] if t['name']=='small-document.pdf' and t['state']=='completed'),None),timeout=15)
+                    check_hash(Path(task['path']),1024)
+                    report['checks'].append('1 KiB PDF captured using native Chrome filename determination')
+                    return
                 page.get_by_role('link',name='Automatic archive').click()
                 def completed(name):
                     tasks=core.call('snapshot')['tasks']
@@ -106,12 +127,36 @@ def main():
                 report['checks'].append('automatic capture and SHA-256')
                 page.get_by_role('link',name='Cookie file').click();task=wait(lambda:completed('cookie.zip'));check_hash(Path(task['path']),24*1024*1024)
                 report['checks'].append('cookie-authenticated capture')
+                for label, filename, size in [('Panel archive','panel-archive.TAR.GZ',2*1024*1024),('Small document','small-document.pdf',1024),('Encoded filename','测试.TAR.GZ',2*1024*1024),('Panel redirect','redirected.tar.gz',2*1024*1024)]:
+                    before_ids={t['id'] for t in core.call('snapshot')['tasks']}
+                    page.get_by_role('link',name=label,exact=True).click()
+                    def new_completed():
+                        tasks=core.call('snapshot')['tasks']
+                        failed=[t for t in tasks if t['id'] not in before_ids and t['state']=='failed'];assert not failed,failed
+                        return next((t for t in tasks if t['id'] not in before_ids and t['state']=='completed'),None)
+                    task=wait(new_completed,timeout=45)
+                    assert task['name']==filename,task
+                    check_hash(Path(task['path']),size)
+                    assert len([t for t in core.call('snapshot')['tasks'] if t['id'] not in before_ids])==1
+                    decision=wait(lambda:next((d for d in popup.evaluate('async()=> (await chrome.storage.session.get("decisions")).decisions') if d['filename']==filename and d['code']=='captured'),None))
+                    matching=popup.evaluate('(id)=>chrome.downloads.search({id})',decision['downloadId'])
+                    assert len(matching)==1 and matching[0]['state']=='interrupted',matching
+                    report['checks'].append(label+': filename, one task, cancelled Chrome download, SHA-256')
+                before=len(core.call('snapshot')['tasks'])
+                page.get_by_role('link',name='Unreplayable login').click()
+                wait(lambda:next((i for i in popup.evaluate('(url)=>chrome.downloads.search({url})',base+'/unreplayable.zip?size=2097152') if i['state']=='complete'),None))
+                assert len(core.call('snapshot')['tasks'])==before
+                diagnostic=popup.evaluate('async()=> (await chrome.storage.session.get("decisions")).decisions')
+                assert any(d['code']=='auth_failed' for d in diagnostic),diagnostic
+                assert all('?' not in d['host'] and '?' not in d['filename'] for d in diagnostic)
+                report['checks'].append('authentication replay failure restores Chrome and shows sanitized diagnostic')
+
                 before=len(core.call('snapshot')['tasks'])
                 def browser_completed(url):
                     items=popup.evaluate('(url) => chrome.downloads.search({url})',url)
                     return next((i for i in items if i['state']=='complete'),None)
                 page.get_by_role('link',name='Small file').click()
-                small=wait(lambda:browser_completed(base+'/small.txt'));check_hash(Path(small['filename']),1024)
+                small=wait(lambda:browser_completed(base+'/small.unlisted'));check_hash(Path(small['filename']),1024)
                 assert len(core.call('snapshot')['tasks'])==before
                 report['checks'].append('small file retained in browser')
                 page.get_by_role('button',name='POST download').click()
@@ -184,6 +229,8 @@ def main():
                 try:
                     report['tasks']=core.call('snapshot')['tasks'] if core.p.poll() is None else core.snapshot['tasks']
                     print('Task states:',[(t['source'],t['state'],t['error']) for t in report['tasks']],flush=True)
+                    report['diagnostics']=popup.evaluate('async()=> (await chrome.storage.session.get("decisions")).decisions')
+                    print('Capture decisions:',report['diagnostics'],flush=True)
                 except Exception as e:print('State collection:',str(e),flush=True)
                 context.close()
     finally:
