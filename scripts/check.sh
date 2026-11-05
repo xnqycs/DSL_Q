@@ -12,3 +12,5 @@ swiftc -parse-as-library -target "$check_target" macos/Sources/DSLQ/Models.swift
 .cache/chrome-export-checks
 swiftc -parse-as-library -target "$check_target" macos/Sources/DSLQ/Models.swift macos/Sources/DSLQ/TaskNotifications.swift macos/Checks/NotificationChecks.swift -o .cache/notification-checks
 .cache/notification-checks
+swiftc -parse-as-library -D DSLQ_CHECKS -target "$check_target" macos/Sources/DSLQ/*.swift macos/Checks/SnapshotChecks.swift -o .cache/snapshot-checks
+.cache/snapshot-checks

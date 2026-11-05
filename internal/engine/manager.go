@@ -156,7 +156,12 @@ func (m *Manager) snapshotLocked() Snapshot {
 			s.ActiveCount++
 		}
 	}
-	sort.Slice(s.Tasks, func(i, j int) bool { return s.Tasks[i].CreatedAt.Before(s.Tasks[j].CreatedAt) })
+	sort.Slice(s.Tasks, func(i, j int) bool {
+		if s.Tasks[i].CreatedAt.Equal(s.Tasks[j].CreatedAt) {
+			return s.Tasks[i].ID < s.Tasks[j].ID
+		}
+		return s.Tasks[i].CreatedAt.Before(s.Tasks[j].CreatedAt)
+	})
 	return s
 }
 func (m *Manager) Snapshot() Snapshot { m.mu.Lock(); defer m.mu.Unlock(); return m.snapshotLocked() }
