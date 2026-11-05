@@ -19,7 +19,7 @@ final class AppModel: ObservableObject {
     private var pending: [String: CheckedContinuation<Any, Error>] = [:]
     private var quitting = false
     lazy var windows = DownloadWindows(model: self)
-    let notifications = TaskNotifications()
+    let notifications: TaskNotifications
     var reopenMainWindow: (() -> Void)?
     var activeCount: Int { tasks.filter(\.isActive).count }
     var totalSpeed: Double { tasks.reduce(0) { $0 + $1.speed } }
@@ -28,6 +28,10 @@ final class AppModel: ObservableObject {
     var dataDirectory: URL {
         if ProcessInfo.processInfo.arguments.contains("--integration-test"), let path = ProcessInfo.processInfo.environment["DSLQ_TEST_DATA_DIR"] { return URL(fileURLWithPath: path) }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/DSL Q")
+    }
+
+    init(notifications: TaskNotifications? = nil) {
+        self.notifications = notifications ?? TaskNotifications()
     }
 
     func start() {
@@ -98,8 +102,15 @@ final class AppModel: ObservableObject {
 
     private func apply(_ object: Any) throws {
         let snapshot = try JSONDecoder().decode(EngineSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        try apply(snapshot)
+    }
+
+    func apply(_ snapshot: EngineSnapshot) throws {
         guard snapshot.protocol == 1 else { throw DSLQError.message("下载核心版本不匹配") }
-        tasks = snapshot.tasks; settings = snapshot.settings
+        if tasks != snapshot.tasks { tasks = snapshot.tasks }
+        if settings != snapshot.settings { settings = snapshot.settings }
+        // Even an unchanged first snapshot establishes the notification baseline.
+        // Lifecycle synchronization must not depend on publishing a UI change.
         notifications.update(tasks, settings: settings)
         windows.sync(tasks)
         updatePower()
@@ -108,7 +119,9 @@ final class AppModel: ObservableObject {
     func taskRequest(_ method: String, _ params: [String: Any]) async throws -> DownloadTask {
         let value = try await request(method, params)
         let task = try JSONDecoder().decode(DownloadTask.self, from: JSONSerialization.data(withJSONObject: value))
-        if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task } else { tasks.append(task) }
+        if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+            if tasks[index] != task { tasks[index] = task }
+        } else { tasks.append(task) }
         return task
     }
 
@@ -135,7 +148,9 @@ final class AppModel: ObservableObject {
         }
     }
     func saveSettings(_ value: DownloadSettings) async throws {
-        _ = try await request("settings.update", try dictionary(value)); settings = value; updatePower()
+        _ = try await request("settings.update", try dictionary(value))
+        if settings != value { settings = value }
+        updatePower()
     }
     func toggleSleep(_ enabled: Bool) {
         var next = settings; next.preventIdleSleepWhileDownloading = enabled

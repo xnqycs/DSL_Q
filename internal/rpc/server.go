@@ -155,26 +155,18 @@ func Serve(input io.Reader, output io.Writer, dir string) error {
 		return errors.New("初始化密钥格式错误")
 	}
 	var writeMu sync.Mutex
-	write := func(v Response) { writeMu.Lock(); defer writeMu.Unlock(); _ = json.NewEncoder(output).Encode(v) }
-	// Coalesce snapshots so a slow UI cannot block downloads or shutdown.
+	write := func(v Response) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return json.NewEncoder(output).Encode(v)
+	}
+	// Coalesce snapshots so a slow UI cannot block the download engine loop.
 	events := make(chan engine.Snapshot, 1)
 	eventDone := make(chan struct{})
 	defer close(eventDone)
-	go func() {
-		for {
-			select {
-			case s := <-events:
-				write(Response{JSONRPC: "2.0", Protocol: 1, Method: "snapshot", Params: s})
-			case <-eventDone:
-				return
-			}
-		}
-	}()
+	go forwardSnapshots(events, eventDone, write)
 	m, e := engine.New(dir, key, func(s engine.Snapshot) {
-		select {
-		case events <- s:
-		default:
-		}
+		queueSnapshot(events, s)
 	})
 	for i := range key {
 		key[i] = 0

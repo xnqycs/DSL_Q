@@ -107,3 +107,15 @@
 - 从当前 `AppDelegate` 源码提取的一次性 AppKit 检查通过：可见窗口复用、关闭隐藏、辅助窗口打开/关闭不改变策略、辅助窗口仍可见时重开、连续 5 次快速关闭重开、最小化与恢复、最后窗口关闭后保持运行。记录：`.cache/dock-lifecycle.log`；该检查使用替身退出模型，不代表下载核心测试。
 - 隔离应用包、数据库和本地 HTTP 文件实机验证了鼠标 ×、⌘W、下载确认/进度窗口、设置入口恢复及键盘输入、访达重开、最小化和 ⌘Q 正常退出。主窗口关闭期间下载继续，32 MiB 文件最终 SHA-256 一致。报告：`.cache/dock-ui-report.json`。事件诊断只加入临时测试副本，没有进入交付构建。
 - 验证边界：运行环境为 Apple Silicon / macOS 27.2，macOS 14 仅通过部署目标编译。Dock 显示状态通过系统 `NSRunningApplication.activationPolicy` 核对；当前界面工具未提供 Dock 和状态栏菜单的可用界面，因此未直接验收菜单栏图标点选、菜单栏退出及通知中心卡片点击。其入口代码已核对，共用的主窗口恢复路径已实测。未替换 `/Applications/DSL Q.app`，未修改日常浏览器配置。
+
+## 后台空闲 CPU 修复（2026-11-06）
+
+- 修复前，安装版 0.2.2 的 6 个任务均已完成；25 秒观测中原生进程消耗 4.16 秒 CPU 时间，平均约 16.6%，核心约 0.6%。调用栈反复出现 `NSStatusItem` / `MenuBarExtra` 重绘。单独运行原核心、使用空数据库，3.1 秒收到 12 份完全相同的快照；同值 `@Published` 赋值实验也确认会重复触发更新通知。
+- RPC 改为保留最新待发送快照，在输出端去重；相同创建时间的任务按 ID 稳定排序。原生任务、设置和防休眠状态只在值变化时发布。首次空快照仍建立通知基线，确认窗口、通知和电源同步保持执行；下载调度及进度刷新周期仍为 250 毫秒，协议字段和数据库格式不变。
+- `scripts/check.sh` 通过：Go 竞态检查、扩展类型检查与 18 项测试、Swift 构建、电源/扩展导出/通知检查，以及新增快照检查。新增覆盖相同快照去重、分段和设置变化、慢消费者接收最终完成状态、写失败退出、稳定排序、快照独立副本、首次空列表与历史通知基线。Swift 检查沿用独立可执行程序方式，无需本机 Command Line Tools 未附带的 XCTest。日志：`.cache/idle-cpu-check.log`。
+- `scripts/build.sh` 与应用签名验证通过，macOS 14 部署目标不变。打包核心空闲 3.1 秒只发送 1 份初始快照，无重复发送；空闲时修改设置正常送达。记录：`.cache/idle-cpu-build.log`、`.cache/idle-cpu-core-report.json`。
+- 隔离发布应用使用独立 bundle ID、数据库和合成密钥，预置 6 个已完成任务。关闭主窗口、确认 `.accessory` 后连续测量 60.08 秒：原生进程累计 CPU 时间未增加到 `ps` 的 0.01 秒精度，观测平均 0.0%，核心平均约 0.083%。随后 5 秒采样的 457 次主线程栈全部处于系统事件等待，未出现菜单栏重绘热点。记录：`.cache/idle-cpu-performance.json`、`.cache/idle-cpu-sample.txt`。前后使用不同数据库，不将该结果视为所有任务规模或系统版本的性能保证。
+- 实机隔离验证：主窗口关闭后浏览器 IPC 弹出确认，开始下载保持 `.accessory`；暂停释放防休眠断言，继续重新获取；设置快捷键重开主窗口并恢复 `.regular`。关闭所有窗口后 32 MiB 下载完成，SHA-256 为 `1cbd22e11bc209926b1e050d644779ba4105d7a023109c3b78bb35edf5c7c292`，完成后释放断言，再测 10 秒原生 CPU 仍为观测 0.0%。重开显示最终完成状态，⌘Q 后应用与核心均退出。记录：`.cache/idle-cpu-ui-report.json`、`.cache/idle-cpu-background-report.json`、`.cache/idle-cpu-after-download.json`。
+- 真实 Chrome 156.0.8078.81、独立配置联调 17 项通过，覆盖握手、接管与确认、Cookie、慢响应、重定向、小文档、SHA-256、取消、失败回退及 Service Worker 重启恢复。日志：`.cache/idle-cpu-chrome.log`。
+
+验证边界：仅在 Apple Silicon / macOS 27.2 运行；当前电脑工具只暴露应用窗口，SystemUIServer 读取超时，因此未直接点击状态栏图标验证菜单重开，共用的主窗口恢复路径已经实测。本次未替换已安装的 `/Applications/DSL Q.app`，未修改日常 Chrome 配置，未发布版本。

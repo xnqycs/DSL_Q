@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import IOKit.pwr_mgt
 
 final class FakeAssertions: PowerAssertions {
@@ -12,11 +13,18 @@ struct PowerChecks {
     @MainActor static func main() throws {
         let fake = FakeAssertions()
         let controller = PowerController(provider: fake)
+        var publications = 0
+        let subscription = controller.objectWillChange.sink { publications += 1 }
+        defer { withExtendedLifetime(subscription) {} }
+        for _ in 0..<12 { controller.update(enabled: true, activeCount: 0, connected: true) }
+        controller.release()
+        precondition(publications == 0, "idle updates must not invalidate the UI")
         controller.update(enabled: false, activeCount: 1, connected: true)
         precondition(!controller.holding && fake.acquisitions == 0)
         controller.update(enabled: true, activeCount: 1, connected: true)
+        let afterAcquisition = publications
         controller.update(enabled: true, activeCount: 3, connected: true)
-        precondition(controller.holding && fake.acquisitions == 1)
+        precondition(controller.holding && fake.acquisitions == 1 && publications == afterAcquisition)
         controller.update(enabled: true, activeCount: 0, connected: true)
         precondition(!controller.holding && fake.releases == 1)
         controller.update(enabled: true, activeCount: 1, connected: true)

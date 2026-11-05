@@ -36,8 +36,8 @@ json yaml yml xml toml ini log sql db sqlite bak patch diff jar war wasm bin
     var excludedHosts: [String] = []
 }
 
-struct DownloadChunk: Codable { let start: Int64; let end: Int64; let done: Bool }
-struct DownloadTask: Codable, Identifiable {
+struct DownloadChunk: Codable, Equatable { let start: Int64; let end: Int64; let done: Bool }
+struct DownloadTask: Codable, Identifiable, Equatable {
     let contentType: String?
     let runId: String?
     let started: Bool?

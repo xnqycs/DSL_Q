@@ -31,16 +31,22 @@ final class PowerController: ObservableObject {
         if !wanted {
             release()
             previouslyWanted = false
-            failure = nil
+            if failure != nil { failure = nil }
         } else if !previouslyWanted {
             previouslyWanted = true
-            do { assertion = try provider.acquire(); holding = true; failure = nil }
-            catch { holding = false; failure = error.localizedDescription }
+            do {
+                assertion = try provider.acquire()
+                if !holding { holding = true }
+                if failure != nil { failure = nil }
+            } catch {
+                if holding { holding = false }
+                if failure != error.localizedDescription { failure = error.localizedDescription }
+            }
         }
     }
     func release() {
         if let id = assertion { provider.release(id); assertion = nil }
-        holding = false
+        if holding { holding = false }
         previouslyWanted = false
     }
 }

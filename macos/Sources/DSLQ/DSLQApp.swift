@@ -85,7 +85,9 @@ struct MainWindowObserver: NSViewRepresentable {
     }
 }
 
+#if !DSLQ_CHECKS
 @main
+#endif
 struct DSLQApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
